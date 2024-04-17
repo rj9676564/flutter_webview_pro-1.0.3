@@ -102,7 +102,7 @@
     [_channel setMethodCallHandler:^(FlutterMethodCall* call, FlutterResult result) {
       [weakSelf onMethodCall:call result:result];
     }];
-
+      self.canGoBack = NO;
     if (@available(iOS 11.0, *)) {
       _webView.scrollView.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
       if (@available(iOS 13.0, *)) {
@@ -110,6 +110,11 @@
       }
     }
 
+      // 添加观察者来观察 canGoBack 属性的变化
+    [_webView addObserver:self forKeyPath:@"canGoBack" options:NSKeyValueObservingOptionNew context:nil];
+
+      // 添加观察者来观察 canGoForward 属性的变化
+    [_webView addObserver:self forKeyPath:@"canGoForward" options:NSKeyValueObservingOptionNew context:nil];
     [self applySettings:settings];
     // TODO(amirh): return an error if apply settings failed once it's possible to do so.
     // https://github.com/flutter/flutter/issues/36228
@@ -120,6 +125,22 @@
     }
   }
   return self;
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(id)object change:(NSDictionary<NSKeyValueChangeKey,id> *)change context:(void *)context {
+    if ([keyPath isEqualToString:@"canGoBack"]) {
+        BOOL canGoBack = [[change objectForKey:NSKeyValueChangeNewKey] boolValue];
+        NSLog(@"OVFK canGoBack: %@", canGoBack ? @"YES" : @"NO");
+        // 这里可以根据 canGoBack 的值执行相应的操作
+        self.canGoBack = canGoBack;
+        [_channel invokeMethod:@"onPageFinished" arguments:@{@"url" : _webView.URL.absoluteString}];
+    } else if ([keyPath isEqualToString:@"canGoForward"]) {
+        BOOL canGoForward = [[change objectForKey:NSKeyValueChangeNewKey] boolValue];
+        NSLog(@"OVFK canGoForward: %@", canGoForward ? @"YES" : @"NO");
+        // 这里可以根据 canGoForward 的值执行相应的操作
+    } else {
+        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+    }
 }
 
 - (void)dealloc {
@@ -194,12 +215,12 @@
 
 - (void)onCanGoBack:(FlutterMethodCall*)call result:(FlutterResult)result {
   BOOL canGoBack = [_webView canGoBack];
-  result([NSNumber numberWithBool:canGoBack]);
+  result([NSNumber numberWithBool:self.canGoBack]);
 }
 
 - (void)onCanGoForward:(FlutterMethodCall*)call result:(FlutterResult)result {
-  BOOL canGoForward = [_webView canGoForward];
-  result([NSNumber numberWithBool:canGoForward]);
+//  BOOL canGoForward = [_webView canGoForward];
+  result([NSNumber numberWithBool:self.canGoBack]);
 }
 
 - (void)onGoBack:(FlutterMethodCall*)call result:(FlutterResult)result {

@@ -8,7 +8,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 @interface FLWebViewController : NSObject <FlutterPlatformView, WKUIDelegate>
-
+@property (nonatomic, assign) BOOL canGoBack;
 - (instancetype)initWithFrame:(CGRect)frame
                viewIdentifier:(int64_t)viewId
                     arguments:(id _Nullable)args
@@ -18,6 +18,7 @@ NS_ASSUME_NONNULL_BEGIN
 @end
 
 @interface FLWebViewFactory : NSObject <FlutterPlatformViewFactory>
+
 - (instancetype)initWithMessenger:(NSObject<FlutterBinaryMessenger>*)messenger;
 @end
 
