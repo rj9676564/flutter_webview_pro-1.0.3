@@ -12,15 +12,18 @@ import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.hardware.display.DisplayManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Message;
 import android.provider.MediaStore;
+import android.provider.Settings;
 import android.util.Log;
 import android.view.View;
 import android.webkit.GeolocationPermissions;
+import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
@@ -62,6 +65,8 @@ public class FlutterWebView implements PlatformView, MethodCallHandler {
 
     private ValueCallback<Uri> uploadMessage;
     private ValueCallback<Uri[]> uploadMessageAboveL;
+    private WebChromeClient.FileChooserParams fileChooserParams;
+    private String acceptType;
     private final static int FILE_CHOOSER_RESULT_CODE = 10000;
     public static final int RESULT_OK = -1;
 
@@ -69,9 +74,156 @@ public class FlutterWebView implements PlatformView, MethodCallHandler {
     private static final int REQUEST_CAMERA = 1;
     private static final int REQUEST_LOCATION = 100;
     private Uri cameraUri;
-
+    private static final int PERMISSION_QUEST_TRTC_CAMERA_VERIFY = 12;//trtc模式的权限申请
+    private static final int PERMISSION_QUEST_OLD_CAMERA_VERIFY = 11;//录制模式的权限申请
     // Verifies that a url opened by `Window.open` has a secure url.
     private class FlutterWebChromeClient extends WebChromeClient {
+        private PermissionRequest request;
+        private boolean belowApi21;// android 5.0以下系统
+
+        private int checkSdkPermission(String permission) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                int permissionResult = ContextCompat.checkSelfPermission(WebViewFlutterPlugin.activity, permission);
+                Log.d(TAG, "checkSdkPermission >=23 " + permissionResult + " permission=" + permission);
+                return permissionResult;
+            } else {
+                int permissionResult = WebViewFlutterPlugin.activity.getPackageManager().checkPermission(permission, WebViewFlutterPlugin.activity.getPackageName());
+                Log.d(TAG, "checkSdkPermission <23 =" + permissionResult + " permission=" + permission);
+                return permissionResult;
+            }
+        }
+        /**
+         * 针对trtc录制模式，申请相机权限
+         */
+        public void requestCameraPermission(boolean trtc,boolean belowApi21) {
+            this.belowApi21=belowApi21;
+            if (checkSdkPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                Log.d(TAG, "checkSelfPermission false");
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {  //23+的情况
+                    if (ActivityCompat.shouldShowRequestPermissionRationale(WebViewFlutterPlugin.activity, Manifest.permission.CAMERA)) {
+                        //用户之前拒绝过，这里返回true
+                        Log.d(TAG, "shouldShowRequestPermissionRationale true");
+                        if (trtc){
+                            ActivityCompat.requestPermissions(WebViewFlutterPlugin.activity,
+                                    new String[]{Manifest.permission.CAMERA},
+                                    PERMISSION_QUEST_TRTC_CAMERA_VERIFY);
+                        }else {
+                            ActivityCompat.requestPermissions(WebViewFlutterPlugin.activity,
+                                    new String[]{Manifest.permission.CAMERA},
+                                    PERMISSION_QUEST_OLD_CAMERA_VERIFY);
+                        }
+                    } else {
+                        Log.d(TAG, "shouldShowRequestPermissionRationale false");
+                        if (trtc){
+                            ActivityCompat.requestPermissions(WebViewFlutterPlugin.activity,
+                                    new String[]{Manifest.permission.CAMERA},
+                                    PERMISSION_QUEST_TRTC_CAMERA_VERIFY);
+                        }else {
+                            ActivityCompat.requestPermissions(WebViewFlutterPlugin.activity,
+                                    new String[]{Manifest.permission.CAMERA},
+                                    PERMISSION_QUEST_OLD_CAMERA_VERIFY);
+                        }
+
+                    }
+                } else {
+                    if (trtc){
+                        //23以下没法系统弹窗动态申请权限，只能用户跳转设置页面，自己打开
+                        openAppDetail(PERMISSION_QUEST_TRTC_CAMERA_VERIFY);
+                    }else {
+                        //23以下没法系统弹窗动态申请权限，只能用户跳转设置页面，自己打开
+                        openAppDetail(PERMISSION_QUEST_OLD_CAMERA_VERIFY);
+                    }
+                }
+
+            } else {
+                Log.d(TAG, "checkSelfPermission true");
+                if (trtc){
+                    enterTrtcFaceVerify();
+                }else {
+                    enterOldModeFaceVerify(belowApi21);
+                }
+
+            }
+        }
+        private void openAppDetail(int requestCode) {
+            showWarningDialog(requestCode);
+        }
+        AlertDialog dialog = null;
+        private void showWarningDialog(final int requestCode) {
+            dialog = new AlertDialog.Builder( WebViewFlutterPlugin.activity)
+                    .setTitle("权限申请提示")
+                    .setMessage("请前往设置->应用->权限中打开相关权限，否则功能无法正常运行！")
+                    .setPositiveButton("确定", new DialogInterface.OnClickListener() {
+                        @Override
+                        public void onClick(DialogInterface dialogInterface, int which) {
+                            // 一般情况下如果用户不授权的话，功能是无法运行的，做退出处理,合作方自己根据自身产品决定是退出还是停留
+                            if (dialog != null && dialog.isShowing()) {
+                                dialog.dismiss();
+                            }
+                            dialog = null;
+                            enterSettingActivity(requestCode);
+
+                        }
+                    }).setNegativeButton("取消", new DialogInterface.OnClickListener() {
+                        @Override
+                        public void onClick(DialogInterface dialogInterface, int which) {
+                            if (dialog != null && dialog.isShowing()) {
+                                dialog.dismiss();
+                            }
+                            dialog = null;
+                            WBH5FaceVerifySDK.getInstance().resetReceive();
+
+                        }
+                    }).setCancelable(false).show();
+        }
+        //老的录制模式中，拉起系统相机进行录制视频
+        public boolean enterOldModeFaceVerify(boolean belowApi21){
+            Log.d(TAG,"enterOldFaceVerify");
+            if (belowApi21){ // For Android < 5.0
+                if (WBH5FaceVerifySDK.getInstance().recordVideoForApiBelow21(uploadMessage, acceptType, WebViewFlutterPlugin.activity)) { //腾讯的h5刷脸
+                    return true;
+                }else {
+                    // todo 合作方如果其他的h5页面处理，则再次补充其他页面逻辑
+                }
+            }else { // For Android >= 5.0
+                if (WBH5FaceVerifySDK.getInstance().recordVideoForApi21(webView, uploadMessageAboveL, WebViewFlutterPlugin.activity,fileChooserParams)) {  //腾讯的h5刷脸
+                    return true;
+                }else {
+                    // todo 合作方如果其他的h5页面处理，则再次补充其他页面逻辑
+
+                }
+            }
+            return false;
+        }
+
+        private void enterSettingActivity(int requestCode) {
+            //部分插件化框架中用Activity.getPackageName拿到的不一定是宿主的包名，所以改用applicationContext获取
+            String packageName = WebViewFlutterPlugin.activity.getApplicationContext().getPackageName();
+            Uri uri = Uri.fromParts("package", packageName, null);
+            Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, uri);
+            ResolveInfo resolveInfo = WebViewFlutterPlugin.activity.getPackageManager().resolveActivity(intent, 0);
+            if (resolveInfo != null) {
+                WebViewFlutterPlugin.activity.startActivityForResult(intent, requestCode);
+            }
+        }
+
+        /**
+         * H5_TRTC 刷脸配置，这里负责处理来自H5页面发出的相机权限申请：先申请终端的相机权限，再授权h5请求
+         *
+         * @param request 来自H5页面的权限请求
+         */
+        @Override
+        public void onPermissionRequest(PermissionRequest request) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                if (request != null && request.getOrigin() != null && WBH5FaceVerifySDK.getInstance().isTencentH5FaceVerify(request.getOrigin().toString())) { //腾讯意愿性h5刷脸的域名
+                    Log.d(TAG, "onPermissionRequest 发起腾讯h5刷脸的相机授权");
+                    this.request = request;
+                    enterTrtcFaceVerify();
+                }
+            }
+
+        }
+
         @Override
         public boolean onCreateWindow(
                 final WebView view, boolean isDialog, boolean isUserGesture, Message resultMsg) {
@@ -110,6 +262,31 @@ public class FlutterWebView implements PlatformView, MethodCallHandler {
             return true;
         }
 
+        public void enterTrtcFaceVerify() {
+            Log.d(TAG, "enterTrtcFaceVerify");
+            if (Build.VERSION.SDK_INT > Build.VERSION_CODES.LOLLIPOP) { // android sdk 21以上
+                if (request != null && request.getOrigin() != null) {
+                    //根据腾讯域名授权，如果合作方对授权域名无限制的话，这个if条件判断可以去掉，直接进行授权即可。
+                    Log.d(TAG, "enterTrtcFaceVerify getOrigin()!=null");
+                    if (WBH5FaceVerifySDK.getInstance().isTencentH5FaceVerify(request.getOrigin().toString())) {
+                        Log.d(TAG, "enterTrtcFaceVerify 授权成功");
+                        //授权
+                        request.grant(request.getResources());
+                        request.getOrigin();
+                    } else {
+                        Log.d(TAG, "enterTrtcFaceVerify 授权成识别");
+                    }
+                } else {
+                    if (request == null) {
+                        Log.d(TAG, "enterTrtcFaceVerify request==null");
+                        if (webView != null && webView.canGoBack()) {
+                            webView.goBack();
+                        }
+                    }
+                }
+            }
+        }
+
         @Override
         public void onProgressChanged(WebView view, int progress) {
             flutterWebViewClient.onLoadingProgress(progress);
@@ -118,6 +295,8 @@ public class FlutterWebView implements PlatformView, MethodCallHandler {
         // For Android < 3.0
         public void openFileChooser(ValueCallback<Uri> valueCallback) {
             Log.v(TAG, "openFileChooser Android < 3.0");
+
+
             if (uploadMessage != null) {
                 uploadMessage.onReceiveValue(null);
             }
@@ -128,13 +307,21 @@ public class FlutterWebView implements PlatformView, MethodCallHandler {
         // For Android  >= 3.0
         public void openFileChooser(ValueCallback valueCallback, String acceptType) {
             Log.v(TAG, "openFileChooser Android  >= 3.0");
-            uploadMessage = valueCallback;
+
+            FlutterWebView.this.uploadMessage = valueCallback;
             takePhotoOrOpenGallery();
         }
 
         //For Android  >= 4.1
         public void openFileChooser(ValueCallback<Uri> valueCallback, String acceptType, String capture) {
             Log.v(TAG, "openFileChooser Android  >= 4.1");
+            if (WBH5FaceVerifySDK.getInstance().isTencentH5FaceVerify(null, null, acceptType)) { //true 说明是腾讯的h5刷脸页面
+                uploadMessage = valueCallback;
+                FlutterWebView.this.acceptType = acceptType;
+
+                WBH5FaceVerifySDK.getInstance().setmUploadMessage(uploadMessage);
+                enterTrtcFaceVerify();
+            }
             uploadMessage = valueCallback;
             takePhotoOrOpenGallery();
         }
@@ -144,6 +331,14 @@ public class FlutterWebView implements PlatformView, MethodCallHandler {
         public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, FileChooserParams fileChooserParams) {
             Log.v(TAG, "openFileChooser Android >= 5.0");
             uploadMessageAboveL = filePathCallback;
+            FlutterWebView.this.fileChooserParams = fileChooserParams;
+            if (WBH5FaceVerifySDK.getInstance().isTencentH5FaceVerify(webView, fileChooserParams, null)) { //true说 明是腾讯的h5刷脸页面
+
+                WBH5FaceVerifySDK.getInstance().setmUploadCallbackAboveL(filePathCallback);
+//                activity.requestCameraPermission(false,false);
+                    enterTrtcFaceVerify();
+                return true;
+            }
             takePhotoOrOpenGallery();
             return true;
         }
@@ -736,5 +931,6 @@ public class FlutterWebView implements PlatformView, MethodCallHandler {
         uploadMessageAboveL.onReceiveValue(results);
         uploadMessageAboveL = null;
     }
+
 }
 
