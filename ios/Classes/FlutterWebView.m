@@ -294,18 +294,46 @@
 
 - (void)clearCache:(FlutterResult)result {
   if (@available(iOS 9.0, *)) {
-    NSSet* cacheDataTypes = [WKWebsiteDataStore allWebsiteDataTypes];
-    WKWebsiteDataStore* dataStore = [WKWebsiteDataStore defaultDataStore];
-    NSDate* dateFrom = [NSDate dateWithTimeIntervalSince1970:0];
-    [dataStore removeDataOfTypes:cacheDataTypes
-                   modifiedSince:dateFrom
-               completionHandler:^{
-                 result(nil);
-               }];
+    [self clearWebViewCache];
+    [self clearCookies];
   } else {
     // support for iOS8 tracked in https://github.com/flutter/flutter/issues/27624.
     NSLog(@"Clearing cache is not supported for Flutter WebViews prior to iOS 9.");
   }
+}
+
+- (void)clearWebViewCache {
+    // 获取所有网站数据类型
+    NSSet* cacheDataTypes = [WKWebsiteDataStore allWebsiteDataTypes];
+    // 获取默认的数据存储
+    WKWebsiteDataStore* dataStore = [WKWebsiteDataStore defaultDataStore];
+    // 设置时间，从1970年开始
+    NSDate* dateFrom = [NSDate dateWithTimeIntervalSince1970:0];
+
+    // 清除网站数据
+    [dataStore removeDataOfTypes:cacheDataTypes
+                   modifiedSince:dateFrom
+               completionHandler:^{
+                   NSLog(@"All website data removed.");
+
+                   // 手动清除 cookies
+                   [self clearCookies];
+               }];
+}
+
+- (void)clearCookies {
+    WKWebsiteDataStore* dataStore = [WKWebsiteDataStore defaultDataStore];
+    WKHTTPCookieStore* cookieStore = dataStore.httpCookieStore;
+
+    // 获取所有 cookies
+    [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+        for (NSHTTPCookie *cookie in cookies) {
+            // 删除每个 cookie
+            [cookieStore deleteCookie:cookie completionHandler:^{
+                NSLog(@"Deleted cookie: %@", cookie.name);
+            }];
+        }
+    }];
 }
 
 - (void)onGetTitle:(FlutterResult)result {
