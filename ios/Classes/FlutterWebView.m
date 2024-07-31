@@ -295,7 +295,7 @@
 - (void)clearCache:(FlutterResult)result {
   if (@available(iOS 9.0, *)) {
     [self clearWebViewCache];
-    [self clearCookies];
+(*     [self clearCookies]; *)
   } else {
     // support for iOS8 tracked in https://github.com/flutter/flutter/issues/27624.
     NSLog(@"Clearing cache is not supported for Flutter WebViews prior to iOS 9.");
