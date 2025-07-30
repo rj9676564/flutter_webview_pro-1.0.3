@@ -53,11 +53,11 @@ public class WBH5FaceVerifySDK {
         webSetting.setUseWideViewPort(true);
         webSetting.setSupportMultipleWindows(false);
         webSetting.setLoadWithOverviewMode(true);
-        webSetting.setAppCacheEnabled(true);
+        // webSetting.setAppCacheEnabled(true);
         webSetting.setDatabaseEnabled(true);
         webSetting.setDomStorageEnabled(true);
-        webSetting.setAppCacheMaxSize(Long.MAX_VALUE);
-        webSetting.setAppCachePath(context.getDir("appcache", 0).getPath());
+        // webSetting.setAppCacheMaxSize(Long.MAX_VALUE);
+        // webSetting.setAppCachePath(context.getDir("appcache", 0).getPath());
         webSetting.setDatabasePath(context.getDir("databases", 0).getPath());
         webSetting.setPluginState(WebSettings.PluginState.ON_DEMAND);
         webSetting.setRenderPriority(WebSettings.RenderPriority.HIGH);
