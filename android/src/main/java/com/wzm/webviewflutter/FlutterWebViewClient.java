@@ -19,6 +19,7 @@ import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.Toast;
 
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
@@ -182,28 +183,39 @@ class FlutterWebViewClient {
       @TargetApi(Build.VERSION_CODES.N)
       @Override
       public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
-        try {
           String url = request.getUrl().toString();
-          if (url.startsWith("http:") || url.startsWith("https:")) {
-            HashMap<String, String> lStringStringHashMap = new HashMap<>();
-            if (!TextUtils.isEmpty(mReffer)) {
-              lStringStringHashMap.put("referer", mReffer);
-              view.loadUrl(url, lStringStringHashMap);
-            } else {
-              view.loadUrl(url, lStringStringHashMap);
-            }
-          } else {
-            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
-            context.startActivity(intent);
-          }
-          FlutterWebViewClient.this.onPageFinished(view,url);
-          return true;
-        } catch (Exception e) {
 
-        }
-        //使用WebView加载显示url
-//        view.loadUrl(url);
-        return FlutterWebViewClient.this.shouldOverrideUrlLoading(view, request);
+          // 1. 微信支付专用：必须拦截并拉起微信客户端
+          if (url.startsWith("weixin://")) {
+              try {
+                  Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
+                  intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                  context.startActivity(intent);
+                  return true;  // 这一步必须 return true，否则不会拉起
+              } catch (Exception e) {
+                  // 微信未安装，提示用户
+                  Toast.makeText(context, "请先安装微信", Toast.LENGTH_SHORT).show();
+                  return true;
+              }
+          }
+
+          // 3. 普通 http/https 链接：加上 Referer（您原来的支付发起页需要）
+          if (url.startsWith("http://") || url.startsWith("https://")) {
+              HashMap<String, String> headers = new HashMap<>();
+              if (!TextUtils.isEmpty(mReffer)) {
+                  headers.put("Referer", mReffer);  // 关键，解决“商家参数格式有误”
+              }
+              view.loadUrl(url, headers);
+              return true;
+          }
+
+          // 4. 其他所有情况（包括您之前的特殊处理）：交给父类或 Flutter 插件处理
+          //    这样完全兼容 FlutterWebViewClient.this.shouldOverrideUrlLoading 的原有逻辑
+          try {
+              return FlutterWebViewClient.this.shouldOverrideUrlLoading(view, request);
+          } catch (Exception e) {
+              return false;
+          }
       }
 
       @Override
@@ -244,15 +256,13 @@ class FlutterWebViewClient {
         String url = request.getUrl().toString();
         ///获取RequestHeader中的所有 key value
         Map<String, String> lRequestHeaders = request.getRequestHeaders();
-        Log.e("测试URI",url);
-        for (Map.Entry<String, String> lStringStringEntry : lRequestHeaders.entrySet()) {
-          Log.d("测试header", lStringStringEntry.getKey() + "  " + lStringStringEntry.getValue());
-        }
+
         if (lRequestHeaders.containsKey("Referer")) {
           mReffer = lRequestHeaders.get("Referer");
         }
 
-
+        Log.e("测试URI",mReffer);
+        Log.e("测试URI",url);
         return super.shouldInterceptRequest(view, request);
       }
     };
