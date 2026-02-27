@@ -375,7 +375,7 @@ class WebSetting<T> {
   }
 
   @override
-  int get hashCode => hashValues(_value, isPresent);
+  int get hashCode => Object.hash(_value, isPresent);
 }
 
 /// Settings for configuring a WebViewPlatform.
