@@ -549,4 +549,14 @@ abstract class WebViewPlatform {
     throw UnimplementedError(
         "WebView clearCookies is not implemented on the current platform");
   }
+
+  /// Clears cookies for the specified domains.
+  ///
+  /// Domain values should be host names or URLs.
+  ///
+  /// Returns true if cookies were present for at least one matching domain before clearing, else false.
+  Future<bool> clearCookiesForDomains(List<String> domains) {
+    throw UnimplementedError(
+        "WebView clearCookiesForDomains is not implemented on the current platform");
+  }
 }

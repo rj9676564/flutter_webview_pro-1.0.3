@@ -828,6 +828,14 @@ class CookieManager {
   ///
   /// Returns true if cookies were present before clearing, else false.
   Future<bool> clearCookies() => WebView.platform.clearCookies();
+
+  /// Clears cookies for the specified domains.
+  ///
+  /// This is a no op on iOS version smaller than 9.
+  ///
+  /// Returns true if cookies were present for at least one matching domain before clearing, else false.
+  Future<bool> clearCookiesForDomains(List<String> domains) =>
+      WebView.platform.clearCookiesForDomains(domains);
 }
 
 // Throws an ArgumentError if `url` is not a valid URL string.

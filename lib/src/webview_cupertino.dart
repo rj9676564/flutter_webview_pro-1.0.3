@@ -44,4 +44,8 @@ class CupertinoWebView implements WebViewPlatform {
 
   @override
   Future<bool> clearCookies() => MethodChannelWebViewPlatform.clearCookies();
+
+  @override
+  Future<bool> clearCookiesForDomains(List<String> domains) =>
+      MethodChannelWebViewPlatform.clearCookiesForDomains(domains);
 }

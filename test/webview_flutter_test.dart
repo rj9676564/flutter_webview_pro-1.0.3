@@ -419,6 +419,19 @@ void main() {
     expect(hasCookiesSecond, false);
   });
 
+  testWidgets('Cookies can be cleared for domains', (WidgetTester tester) async {
+    await tester.pumpWidget(
+      const WebView(
+        initialUrl: 'https://flutter.io',
+      ),
+    );
+    final CookieManager cookieManager = CookieManager();
+    final bool hasCookies = await cookieManager.clearCookiesForDomains(
+      <String>['https://flutter.io'],
+    );
+    expect(hasCookies, true);
+  });
+
   testWidgets('Initial JavaScript channels', (WidgetTester tester) async {
     await tester.pumpWidget(
       WebView(
@@ -1151,6 +1164,15 @@ class _FakeCookieManager {
         return Future<bool>.sync(() {
           return hadCookies;
         });
+      case 'clearCookiesForDomains':
+        bool hadCookies = false;
+        if (hasCookies) {
+          hadCookies = true;
+          hasCookies = false;
+        }
+        return Future<bool>.sync(() {
+          return hadCookies;
+        });
     }
     return Future<bool>.sync(() => true);
   }
@@ -1180,6 +1202,11 @@ class MyWebViewPlatform implements WebViewPlatform {
 
   @override
   Future<bool> clearCookies() {
+    return Future<bool>.sync(() => true);
+  }
+
+  @override
+  Future<bool> clearCookiesForDomains(List<String> domains) {
     return Future<bool>.sync(() => true);
   }
 }
