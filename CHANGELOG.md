@@ -1,3 +1,6 @@
+## 3.1.0
+- add `CookieManager.clearCookiesForDomains` for clearing cookies by domain on Android and iOS
+
 ## 1.0.3
 - fix: iOS run exception,conflict with webview_flutter: ^2.8.0（Issues #9 #11 ）
 
