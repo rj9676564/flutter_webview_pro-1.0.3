@@ -559,4 +559,22 @@ abstract class WebViewPlatform {
     throw UnimplementedError(
         "WebView clearCookiesForDomains is not implemented on the current platform");
   }
+
+  /// Clears cookies, local storage, and cache data for the specified domains.
+  ///
+  /// Domain values should be host names or URLs.
+  ///
+  /// Android WebView does not expose domain-scoped HTTP cache deletion; when
+  /// [includeCache] is true Android clears the WebView HTTP cache globally.
+  ///
+  /// Returns true if any matching website data was found before clearing, else false.
+  Future<bool> clearWebsiteDataForDomains(
+    List<String> domains, {
+    bool includeCookies = true,
+    bool includeLocalStorage = true,
+    bool includeCache = true,
+  }) {
+    throw UnimplementedError(
+        "WebView clearWebsiteDataForDomains is not implemented on the current platform");
+  }
 }

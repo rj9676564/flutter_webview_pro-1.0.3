@@ -61,4 +61,18 @@ class AndroidWebView implements WebViewPlatform {
   @override
   Future<bool> clearCookiesForDomains(List<String> domains) =>
       MethodChannelWebViewPlatform.clearCookiesForDomains(domains);
+
+  @override
+  Future<bool> clearWebsiteDataForDomains(
+    List<String> domains, {
+    bool includeCookies = true,
+    bool includeLocalStorage = true,
+    bool includeCache = true,
+  }) =>
+      MethodChannelWebViewPlatform.clearWebsiteDataForDomains(
+        domains,
+        includeCookies: includeCookies,
+        includeLocalStorage: includeLocalStorage,
+        includeCache: includeCache,
+      );
 }

@@ -180,7 +180,7 @@ class JavascriptChannel {
   JavascriptChannel({
     required this.name,
     required this.onMessageReceived,
-  })   : assert(name != null),
+  })  : assert(name != null),
         assert(onMessageReceived != null),
         assert(_validChannelNames.hasMatch(name));
 
@@ -491,15 +491,14 @@ CreationParams _creationParamsfromWidget(WebView widget) {
 
 WebSettings _webSettingsFromWidget(WebView widget) {
   return WebSettings(
-    javascriptMode: widget.javascriptMode,
-    hasNavigationDelegate: widget.navigationDelegate != null,
-    hasProgressTracking: widget.onProgress != null,
-    debuggingEnabled: widget.debuggingEnabled,
-    gestureNavigationEnabled: widget.gestureNavigationEnabled,
-    allowsInlineMediaPlayback: widget.allowsInlineMediaPlayback,
-    geolocationEnabled: widget.geolocationEnabled,
-    userAgent: WebSetting<String?>.of(widget.userAgent)
-  );
+      javascriptMode: widget.javascriptMode,
+      hasNavigationDelegate: widget.navigationDelegate != null,
+      hasProgressTracking: widget.onProgress != null,
+      debuggingEnabled: widget.debuggingEnabled,
+      gestureNavigationEnabled: widget.gestureNavigationEnabled,
+      allowsInlineMediaPlayback: widget.allowsInlineMediaPlayback,
+      geolocationEnabled: widget.geolocationEnabled,
+      userAgent: WebSetting<String?>.of(widget.userAgent));
 }
 
 // This method assumes that no fields in `currentValue` are null.
@@ -836,6 +835,25 @@ class CookieManager {
   /// Returns true if cookies were present for at least one matching domain before clearing, else false.
   Future<bool> clearCookiesForDomains(List<String> domains) =>
       WebView.platform.clearCookiesForDomains(domains);
+
+  /// Clears cookies, local storage, and cache data for the specified domains.
+  ///
+  /// This is a no op on iOS version smaller than 9.
+  ///
+  /// Android WebView does not expose domain-scoped HTTP cache deletion; when
+  /// [includeCache] is true Android clears the WebView HTTP cache globally.
+  Future<bool> clearWebsiteDataForDomains(
+    List<String> domains, {
+    bool includeCookies = true,
+    bool includeLocalStorage = true,
+    bool includeCache = true,
+  }) =>
+      WebView.platform.clearWebsiteDataForDomains(
+        domains,
+        includeCookies: includeCookies,
+        includeLocalStorage: includeLocalStorage,
+        includeCache: includeCache,
+      );
 }
 
 // Throws an ArgumentError if `url` is not a valid URL string.

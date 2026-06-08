@@ -175,6 +175,22 @@ class MethodChannelWebViewPlatform implements WebViewPlatformController {
         .then<bool>((dynamic result) => result!);
   }
 
+  /// Method channel implementation for [WebViewPlatform.clearWebsiteDataForDomains].
+  static Future<bool> clearWebsiteDataForDomains(
+    List<String> domains, {
+    bool includeCookies = true,
+    bool includeLocalStorage = true,
+    bool includeCache = true,
+  }) {
+    return _cookieManagerChannel
+        .invokeMethod<bool>('clearWebsiteDataForDomains', <String, dynamic>{
+      'domains': domains,
+      'includeCookies': includeCookies,
+      'includeLocalStorage': includeLocalStorage,
+      'includeCache': includeCache,
+    }).then<bool>((dynamic result) => result!);
+  }
+
   static Map<String, dynamic> _webSettingsToMap(WebSettings? settings) {
     final Map<String, dynamic> map = <String, dynamic>{};
     void _addIfNonNull(String key, dynamic value) {

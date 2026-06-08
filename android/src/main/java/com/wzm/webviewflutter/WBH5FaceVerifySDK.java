@@ -47,6 +47,8 @@ public class WBH5FaceVerifySDK {
         webSetting.setJavaScriptEnabled(true);
         webSetting.setTextZoom(100);
         webSetting.setAllowFileAccess(true);
+        webSetting.setAllowFileAccessFromFileURLs(false);
+        webSetting.setAllowUniversalAccessFromFileURLs(false);
         webSetting.setLayoutAlgorithm(WebSettings.LayoutAlgorithm.NARROW_COLUMNS);
         webSetting.setSupportZoom(true);
         webSetting.setBuiltInZoomControls(true);

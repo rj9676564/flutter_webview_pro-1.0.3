@@ -375,6 +375,8 @@ public class FlutterWebView implements PlatformView, MethodCallHandler {
         platformThreadHandler = new Handler(context.getMainLooper());
         // Allow local storage.
         webView.getSettings().setDomStorageEnabled(true);
+        webView.getSettings().setAllowFileAccessFromFileURLs(false);
+        webView.getSettings().setAllowUniversalAccessFromFileURLs(false);
         webView.getSettings().setJavaScriptCanOpenWindowsAutomatically(true);
 
         // Multi windows is set with FlutterWebChromeClient by default to handle internal bug: b/159892679.
@@ -933,4 +935,3 @@ public class FlutterWebView implements PlatformView, MethodCallHandler {
     }
 
 }
-

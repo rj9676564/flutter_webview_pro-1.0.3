@@ -21,6 +21,8 @@
     [self clearCookies:result];
   } else if ([[call method] isEqualToString:@"clearCookiesForDomains"]) {
     [self clearCookiesForDomains:[call arguments] result:result];
+  } else if ([[call method] isEqualToString:@"clearWebsiteDataForDomains"]) {
+    [self clearWebsiteDataForDomains:[call arguments] result:result];
   } else {
     result(FlutterMethodNotImplemented);
   }
@@ -85,6 +87,83 @@
   }
 }
 
+- (void)clearWebsiteDataForDomains:(NSDictionary *)options result:(FlutterResult)result {
+  if (@available(iOS 9.0, *)) {
+    if (![options isKindOfClass:[NSDictionary class]]) {
+      result([FlutterError errorWithCode:@"invalid_arguments"
+                                 message:@"Expected a map of website data options"
+                                 details:nil]);
+      return;
+    }
+
+    NSArray *domains = options[@"domains"];
+    if (![domains isKindOfClass:[NSArray class]]) {
+      result([FlutterError errorWithCode:@"invalid_arguments"
+                                 message:@"Expected a list of domains"
+                                 details:nil]);
+      return;
+    }
+
+    BOOL includeCookies = [self boolValue:options[@"includeCookies"] defaultValue:YES];
+    BOOL includeLocalStorage = [self boolValue:options[@"includeLocalStorage"] defaultValue:YES];
+    BOOL includeCache = [self boolValue:options[@"includeCache"] defaultValue:YES];
+
+    NSMutableSet<NSString *> *dataTypes = [NSMutableSet set];
+    if (includeCookies) {
+      [dataTypes addObject:WKWebsiteDataTypeCookies];
+    }
+    if (includeLocalStorage) {
+      [dataTypes addObject:WKWebsiteDataTypeLocalStorage];
+      [dataTypes addObject:WKWebsiteDataTypeSessionStorage];
+      [dataTypes addObject:WKWebsiteDataTypeIndexedDBDatabases];
+      [dataTypes addObject:WKWebsiteDataTypeWebSQLDatabases];
+    }
+    if (includeCache) {
+      [dataTypes addObject:WKWebsiteDataTypeDiskCache];
+      [dataTypes addObject:WKWebsiteDataTypeMemoryCache];
+    }
+    if (dataTypes.count == 0 || domains.count == 0) {
+      result(@(NO));
+      return;
+    }
+
+    WKWebsiteDataStore *dataStore = [WKWebsiteDataStore defaultDataStore];
+    [dataStore fetchDataRecordsOfTypes:dataTypes completionHandler:^(NSArray<WKWebsiteDataRecord *> *records) {
+      NSMutableArray<WKWebsiteDataRecord *> *matchedRecords = [NSMutableArray array];
+      for (WKWebsiteDataRecord *record in records) {
+        NSString *recordDomain = record.displayName.lowercaseString;
+        for (id domainValue in domains) {
+          if (![domainValue isKindOfClass:[NSString class]]) {
+            continue;
+          }
+          NSString *domain = [self normalizedHost:domainValue];
+          if (domain.length == 0) {
+            continue;
+          }
+          if ([self host:recordDomain matchesDomain:domain]) {
+            [matchedRecords addObject:record];
+            break;
+          }
+        }
+      }
+
+      BOOL hadData = matchedRecords.count > 0;
+      if (!hadData) {
+        result(@(NO));
+        return;
+      }
+      [dataStore removeDataOfTypes:dataTypes
+                    forDataRecords:matchedRecords
+                 completionHandler:^{
+                   result(@(YES));
+                 }];
+    }];
+  } else {
+    NSLog(@"Clearing website data is not supported for Flutter WebViews prior to iOS 9.");
+    result(@(NO));
+  }
+}
+
 - (NSString *)normalizedHost:(NSString *)domain {
   NSURLComponents *components = [NSURLComponents componentsWithString:domain];
   if (components.host.length > 0) {
@@ -100,6 +179,21 @@
   }
   return [cookieDomain isEqualToString:domain] ||
          [cookieDomain hasSuffix:[NSString stringWithFormat:@".%@", domain]];
+}
+
+- (BOOL)host:(NSString *)host matchesDomain:(NSString *)domain {
+  if (host.length == 0 || domain.length == 0) {
+    return NO;
+  }
+  return [host isEqualToString:domain] ||
+         [host hasSuffix:[NSString stringWithFormat:@".%@", domain]];
+}
+
+- (BOOL)boolValue:(id)value defaultValue:(BOOL)defaultValue {
+  if ([value isKindOfClass:[NSNumber class]]) {
+    return [value boolValue];
+  }
+  return defaultValue;
 }
 
 @end
