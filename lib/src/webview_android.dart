@@ -63,6 +63,14 @@ class AndroidWebView implements WebViewPlatform {
       MethodChannelWebViewPlatform.clearCookiesForDomains(domains);
 
   @override
+  Future<List<WebViewCookie>> getCookiesForDomains(List<String> domains) =>
+      MethodChannelWebViewPlatform.getCookiesForDomains(domains);
+
+  @override
+  Future<void> setCookies(List<WebViewCookie> cookies) =>
+      MethodChannelWebViewPlatform.setCookies(cookies);
+
+  @override
   Future<bool> clearWebsiteDataForDomains(
     List<String> domains, {
     bool includeCookies = true,
@@ -71,6 +79,18 @@ class AndroidWebView implements WebViewPlatform {
   }) =>
       MethodChannelWebViewPlatform.clearWebsiteDataForDomains(
         domains,
+        includeCookies: includeCookies,
+        includeLocalStorage: includeLocalStorage,
+        includeCache: includeCache,
+      );
+
+  @override
+  Future<bool> clearWebsiteData({
+    bool includeCookies = true,
+    bool includeLocalStorage = true,
+    bool includeCache = true,
+  }) =>
+      MethodChannelWebViewPlatform.clearWebsiteData(
         includeCookies: includeCookies,
         includeLocalStorage: includeLocalStorage,
         includeCache: includeCache,

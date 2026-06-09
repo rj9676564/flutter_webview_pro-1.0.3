@@ -153,6 +153,67 @@ class WebResourceError {
   final String? failingUrl;
 }
 
+/// Cookie data that can be captured from and restored into a WebView session.
+class WebViewCookie {
+  /// Creates a new [WebViewCookie].
+  const WebViewCookie({
+    required this.name,
+    required this.value,
+    required this.domain,
+    this.path = '/',
+    this.isSecure = false,
+    this.isHttpOnly = false,
+    this.expiresDate,
+  });
+
+  /// Cookie name.
+  final String name;
+
+  /// Cookie value.
+  final String value;
+
+  /// Cookie domain.
+  final String domain;
+
+  /// Cookie path.
+  final String path;
+
+  /// Whether the cookie is marked secure.
+  final bool isSecure;
+
+  /// Whether the cookie is marked httpOnly.
+  final bool isHttpOnly;
+
+  /// Expiry date in milliseconds since epoch.
+  final int? expiresDate;
+
+  /// Serializes this cookie into a map.
+  Map<String, dynamic> toMap() {
+    return <String, dynamic>{
+      'name': name,
+      'value': value,
+      'domain': domain,
+      'path': path,
+      'isSecure': isSecure,
+      'isHttpOnly': isHttpOnly,
+      'expiresDate': expiresDate,
+    };
+  }
+
+  /// Deserializes a cookie from a map.
+  factory WebViewCookie.fromMap(Map<dynamic, dynamic> map) {
+    return WebViewCookie(
+      name: map['name'] as String? ?? '',
+      value: map['value'] as String? ?? '',
+      domain: map['domain'] as String? ?? '',
+      path: map['path'] as String? ?? '/',
+      isSecure: map['isSecure'] as bool? ?? false,
+      isHttpOnly: map['isHttpOnly'] as bool? ?? false,
+      expiresDate: map['expiresDate'] as int?,
+    );
+  }
+}
+
 /// Interface for talking to the webview's platform implementation.
 ///
 /// An instance implementing this interface is passed to the `onWebViewPlatformCreated` callback that is
@@ -560,6 +621,18 @@ abstract class WebViewPlatform {
         "WebView clearCookiesForDomains is not implemented on the current platform");
   }
 
+  /// Returns cookies for the specified domains.
+  Future<List<WebViewCookie>> getCookiesForDomains(List<String> domains) {
+    throw UnimplementedError(
+        "WebView getCookiesForDomains is not implemented on the current platform");
+  }
+
+  /// Restores cookies into the current platform cookie store.
+  Future<void> setCookies(List<WebViewCookie> cookies) {
+    throw UnimplementedError(
+        "WebView setCookies is not implemented on the current platform");
+  }
+
   /// Clears cookies, local storage, and cache data for the specified domains.
   ///
   /// Domain values should be host names or URLs.
@@ -576,5 +649,18 @@ abstract class WebViewPlatform {
   }) {
     throw UnimplementedError(
         "WebView clearWebsiteDataForDomains is not implemented on the current platform");
+  }
+
+  /// Clears global WebView cookies, storage, and cache data.
+  ///
+  /// Use this for app-level logout when every WebView session should require
+  /// authentication again.
+  Future<bool> clearWebsiteData({
+    bool includeCookies = true,
+    bool includeLocalStorage = true,
+    bool includeCache = true,
+  }) {
+    throw UnimplementedError(
+        "WebView clearWebsiteData is not implemented on the current platform");
   }
 }

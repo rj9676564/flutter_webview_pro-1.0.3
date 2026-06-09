@@ -175,6 +175,28 @@ class MethodChannelWebViewPlatform implements WebViewPlatformController {
         .then<bool>((dynamic result) => result!);
   }
 
+  /// Method channel implementation for [WebViewPlatform.getCookiesForDomains].
+  static Future<List<WebViewCookie>> getCookiesForDomains(
+      List<String> domains) async {
+    final List<dynamic>? result = await _cookieManagerChannel
+        .invokeMethod<List<dynamic>>('getCookiesForDomains', domains);
+    if (result == null) {
+      return <WebViewCookie>[];
+    }
+    return result
+        .map((dynamic item) =>
+            WebViewCookie.fromMap(item as Map<dynamic, dynamic>))
+        .toList();
+  }
+
+  /// Method channel implementation for [WebViewPlatform.setCookies].
+  static Future<void> setCookies(List<WebViewCookie> cookies) {
+    return _cookieManagerChannel.invokeMethod<void>(
+      'setCookies',
+      cookies.map((WebViewCookie cookie) => cookie.toMap()).toList(),
+    );
+  }
+
   /// Method channel implementation for [WebViewPlatform.clearWebsiteDataForDomains].
   static Future<bool> clearWebsiteDataForDomains(
     List<String> domains, {
@@ -185,6 +207,20 @@ class MethodChannelWebViewPlatform implements WebViewPlatformController {
     return _cookieManagerChannel
         .invokeMethod<bool>('clearWebsiteDataForDomains', <String, dynamic>{
       'domains': domains,
+      'includeCookies': includeCookies,
+      'includeLocalStorage': includeLocalStorage,
+      'includeCache': includeCache,
+    }).then<bool>((dynamic result) => result!);
+  }
+
+  /// Method channel implementation for [WebViewPlatform.clearWebsiteData].
+  static Future<bool> clearWebsiteData({
+    bool includeCookies = true,
+    bool includeLocalStorage = true,
+    bool includeCache = true,
+  }) {
+    return _cookieManagerChannel
+        .invokeMethod<bool>('clearWebsiteData', <String, dynamic>{
       'includeCookies': includeCookies,
       'includeLocalStorage': includeLocalStorage,
       'includeCache': includeCache,

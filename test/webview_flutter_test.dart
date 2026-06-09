@@ -2,6 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
@@ -419,7 +421,8 @@ void main() {
     expect(hasCookiesSecond, false);
   });
 
-  testWidgets('Cookies can be cleared for domains', (WidgetTester tester) async {
+  testWidgets('Cookies can be cleared for domains',
+      (WidgetTester tester) async {
     await tester.pumpWidget(
       const WebView(
         initialUrl: 'https://flutter.io',
@@ -430,6 +433,591 @@ void main() {
       <String>['https://flutter.io'],
     );
     expect(hasCookies, true);
+  });
+
+  testWidgets('SessionWebViewManager reuses resident instances',
+      (WidgetTester tester) async {
+    final SessionWebViewManager manager = SessionWebViewManager();
+
+    await manager.switchToSession('tenant-a',
+        initialUrl: 'https://tenant-a.example.com');
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SessionWebViewSwitcher(
+          manager: manager,
+          javascriptMode: JavascriptMode.unrestricted,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final FakePlatformWebView firstView =
+        fakePlatformViewsController.createdViews.last;
+    await manager.switchToSession('tenant-b',
+        initialUrl: 'https://tenant-b.example.com');
+    await tester.pump();
+    await tester.pump();
+
+    await manager.switchToSession('tenant-a',
+        initialUrl: 'https://tenant-a.example.com');
+    await tester.pump();
+
+    expect(fakePlatformViewsController.createdViews.length, 2);
+    expect(fakePlatformViewsController.createdViews.first, same(firstView));
+    expect(
+      manager.residentSessionKeys,
+      containsAll(<String>['tenant-a', 'tenant-b']),
+    );
+  });
+
+  testWidgets('SessionWebViewManager restores snapshot after LRU eviction',
+      (WidgetTester tester) async {
+    final SessionWebViewManager manager = SessionWebViewManager(
+      capacity: 2,
+      sessionBindingCapture:
+          (String sessionKey, WebViewController controller) async {
+        return controller.evaluateJavascript('window.__sessionBinding');
+      },
+      sessionBindingValidator: (String sessionKey, String? binding) =>
+          binding == sessionKey,
+    );
+
+    await manager.switchToSession('tenant-a',
+        initialUrl: 'https://tenant-a.example.com');
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SessionWebViewSwitcher(
+          manager: manager,
+          javascriptMode: JavascriptMode.unrestricted,
+        ),
+      ),
+    );
+    await tester.pump();
+    FakePlatformWebView viewA = fakePlatformViewsController.createdViews.last;
+    viewA.fakeOnPageFinishedCallback();
+    viewA.storage['localStorage']!['token'] = 'A-TOKEN';
+    viewA.storage['sessionStorage']!['tenant'] = 'tenant-a';
+    viewA.binding = 'tenant-a';
+    _fakeCookieManager.setCookiesForDomain(
+      'tenant-a.example.com',
+      <WebViewCookie>[
+        const WebViewCookie(
+          name: 'sid',
+          value: 'cookie-a',
+          domain: 'tenant-a.example.com',
+        ),
+      ],
+    );
+
+    await manager.switchToSession('tenant-b',
+        initialUrl: 'https://tenant-b.example.com');
+    await tester.pump();
+    await tester.pump();
+    FakePlatformWebView viewB = fakePlatformViewsController.createdViews.last;
+    viewB.fakeOnPageFinishedCallback();
+    viewB.binding = 'tenant-b';
+
+    await manager.switchToSession('tenant-c',
+        initialUrl: 'https://tenant-c.example.com');
+    await tester.pump();
+    await tester.pump();
+
+    expect(manager.residentSessionKeys, isNot(contains('tenant-a')));
+
+    await manager.switchToSession('tenant-a',
+        initialUrl: 'https://tenant-a.example.com');
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    final FakePlatformWebView restoredView =
+        fakePlatformViewsController.createdViews.last;
+    restoredView.fakeOnPageFinishedCallback();
+    await tester.pump();
+    restoredView.fakeOnPageFinishedCallback();
+    await tester.pump();
+
+    expect(restoredView, isNot(same(viewA)));
+    expect(restoredView.currentUrl, 'https://tenant-a.example.com');
+    expect(restoredView.storage['localStorage']!['token'], 'A-TOKEN');
+    expect(restoredView.storage['sessionStorage']!['tenant'], 'tenant-a');
+    expect(
+      _fakeCookieManager
+          .getCookiesForDomain('tenant-a.example.com')
+          .single
+          .value,
+      'cookie-a',
+    );
+  });
+
+  testWidgets('SessionWebViewManager learns cookie domains from navigation',
+      (WidgetTester tester) async {
+    final SessionWebViewManager manager = SessionWebViewManager(capacity: 2);
+
+    await manager.switchToSession(
+      'tenant-a',
+      initialUrl: 'https://landing.a.com',
+    );
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SessionWebViewSwitcher(
+          manager: manager,
+          javascriptMode: JavascriptMode.unrestricted,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final FakePlatformWebView viewA =
+        fakePlatformViewsController.createdViews.last;
+    viewA.fakeNavigate('https://merchant.b.com');
+    await tester.pump();
+    viewA.fakeOnPageFinishedCallback();
+    viewA.storage['localStorage']!['token'] = 'B-TOKEN';
+    _fakeCookieManager.setCookiesForDomain(
+      'merchant.b.com',
+      <WebViewCookie>[
+        const WebViewCookie(
+          name: 'sid',
+          value: 'cookie-b',
+          domain: 'merchant.b.com',
+        ),
+      ],
+    );
+
+    await manager.switchToSession(
+      'tenant-b',
+      initialUrl: 'https://tenant-b.example.com',
+    );
+    await tester.pump();
+    await tester.pump();
+    fakePlatformViewsController.createdViews.last.fakeOnPageFinishedCallback();
+
+    await manager.switchToSession(
+      'tenant-c',
+      initialUrl: 'https://tenant-c.example.com',
+    );
+    await tester.pump();
+    await tester.pump();
+    fakePlatformViewsController.createdViews.last.fakeOnPageFinishedCallback();
+
+    await manager.switchToSession(
+      'tenant-a',
+      initialUrl: 'https://landing.a.com',
+    );
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    final FakePlatformWebView restoredView =
+        fakePlatformViewsController.createdViews.last;
+    restoredView.fakeOnPageFinishedCallback();
+    await tester.pump();
+    restoredView.fakeOnPageFinishedCallback();
+    await tester.pump();
+
+    expect(
+      _fakeCookieManager.getCookiesForDomain('merchant.b.com').single.value,
+      'cookie-b',
+    );
+    expect(restoredView.storage['localStorage']!['token'], 'B-TOKEN');
+  });
+
+  testWidgets(
+      'SessionWebViewManager clears shared session state for a new session key',
+      (WidgetTester tester) async {
+    final SessionWebViewManager manager = SessionWebViewManager(capacity: 2);
+
+    await manager.switchToSession(
+      'tenant-a',
+      initialUrl: 'https://merchant.example.com',
+    );
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SessionWebViewSwitcher(
+          manager: manager,
+          javascriptMode: JavascriptMode.unrestricted,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final FakePlatformWebView viewA =
+        fakePlatformViewsController.createdViews.last;
+    viewA.fakeOnPageFinishedCallback();
+    await tester.pump();
+    viewA.storage['localStorage']!['token'] = 'A-TOKEN';
+    viewA.storage['sessionStorage']!['tenant'] = 'tenant-a';
+    _fakeCookieManager.setCookiesForDomain(
+      'merchant.example.com',
+      <WebViewCookie>[
+        const WebViewCookie(
+          name: 'sid',
+          value: 'cookie-a',
+          domain: 'merchant.example.com',
+        ),
+      ],
+    );
+
+    await manager.switchToSession(
+      'tenant-b',
+      initialUrl: 'https://merchant.example.com',
+    );
+    await tester.pump();
+    await tester.pump();
+
+    final FakePlatformWebView viewB =
+        fakePlatformViewsController.createdViews.last;
+    viewB.fakeOnPageFinishedCallback();
+    await tester.pump();
+
+    expect(viewB.storage['localStorage'], isEmpty);
+    expect(viewB.storage['sessionStorage'], isEmpty);
+    expect(
+      _fakeCookieManager.getCookiesForDomain('merchant.example.com'),
+      isEmpty,
+    );
+  });
+
+  testWidgets('SessionWebViewManager restores after dispose capture failure',
+      (WidgetTester tester) async {
+    final SessionWebViewManager manager = SessionWebViewManager(capacity: 2);
+
+    await manager.switchToSession(
+      'tenant-a',
+      initialUrl: 'https://merchant.example.com',
+    );
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SessionWebViewSwitcher(
+          manager: manager,
+          javascriptMode: JavascriptMode.unrestricted,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final FakePlatformWebView viewA =
+        fakePlatformViewsController.createdViews.last;
+    viewA.fakeOnPageFinishedCallback();
+    viewA.storage['localStorage']!['token'] = 'A-TOKEN';
+    _fakeCookieManager.setCookiesForDomain(
+      'merchant.example.com',
+      <WebViewCookie>[
+        const WebViewCookie(
+          name: 'sid',
+          value: 'cookie-a',
+          domain: 'merchant.example.com',
+        ),
+      ],
+    );
+    await manager.captureSession('tenant-a');
+
+    viewA.throwOnEvaluateJavascript = true;
+    await manager.disposeSession('tenant-a');
+
+    await manager.switchToSession(
+      'tenant-a',
+      initialUrl: 'https://merchant.example.com',
+    );
+    await tester.pump();
+    await tester.pump();
+
+    final FakePlatformWebView restoredView =
+        fakePlatformViewsController.createdViews.last;
+    expect(restoredView, isNot(same(viewA)));
+    expect(restoredView.currentUrl, 'https://merchant.example.com');
+    restoredView.fakeOnPageFinishedCallback();
+    await tester.pump();
+    restoredView.fakeOnPageFinishedCallback();
+    await tester.pump();
+
+    expect(restoredView.storage['localStorage']!['token'], 'A-TOKEN');
+    expect(
+      _fakeCookieManager
+          .getCookiesForDomain('merchant.example.com')
+          .single
+          .value,
+      'cookie-a',
+    );
+  });
+
+  testWidgets('SessionWebViewManager preserves same session platform state',
+      (WidgetTester tester) async {
+    final SessionWebViewManager manager = SessionWebViewManager(capacity: 2);
+
+    await manager.switchToSession(
+      'tenant-a',
+      initialUrl: 'https://merchant.example.com',
+    );
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SessionWebViewSwitcher(
+          manager: manager,
+          javascriptMode: JavascriptMode.unrestricted,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final FakePlatformWebView firstView =
+        fakePlatformViewsController.createdViews.last;
+    firstView.fakeOnPageFinishedCallback();
+    await tester.pump();
+    firstView.storage['localStorage']!['token'] = 'A-TOKEN';
+    _fakeCookieManager.setCookiesForDomain(
+      'merchant.example.com',
+      <WebViewCookie>[
+        const WebViewCookie(
+          name: 'sid',
+          value: 'cookie-a',
+          domain: 'merchant.example.com',
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await manager.switchToSession(
+      'tenant-a',
+      initialUrl: 'https://merchant.example.com',
+    );
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SessionWebViewSwitcher(
+          manager: manager,
+          javascriptMode: JavascriptMode.unrestricted,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final FakePlatformWebView secondView =
+        fakePlatformViewsController.createdViews.last;
+    expect(secondView, isNot(same(firstView)));
+    expect(secondView.storage['localStorage']!['token'], 'A-TOKEN');
+    expect(
+      _fakeCookieManager
+          .getCookiesForDomain('merchant.example.com')
+          .single
+          .value,
+      'cookie-a',
+    );
+  });
+
+  testWidgets('SessionWebViewManager adopts first untracked platform state',
+      (WidgetTester tester) async {
+    _fakeCookieManager.setCookiesForDomain(
+      'merchant.example.com',
+      <WebViewCookie>[
+        const WebViewCookie(
+          name: 'sid',
+          value: 'existing-cookie',
+          domain: 'merchant.example.com',
+        ),
+      ],
+    );
+    FakePlatformWebView.seedLocalStorage(
+      'https://merchant.example.com/',
+      <String, String>{'token': 'EXISTING-TOKEN'},
+    );
+    final SessionWebViewManager manager = SessionWebViewManager(capacity: 2);
+
+    await manager.switchToSession(
+      'tenant-a',
+      initialUrl: 'https://merchant.example.com',
+    );
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SessionWebViewSwitcher(
+          manager: manager,
+          javascriptMode: JavascriptMode.unrestricted,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final FakePlatformWebView view =
+        fakePlatformViewsController.createdViews.last;
+    expect(view.storage['localStorage']!['token'], 'EXISTING-TOKEN');
+    expect(
+      _fakeCookieManager
+          .getCookiesForDomain('merchant.example.com')
+          .single
+          .value,
+      'existing-cookie',
+    );
+  });
+
+  testWidgets('SessionWebViewManager clears all sessions on logout',
+      (WidgetTester tester) async {
+    final SessionWebViewManager manager = SessionWebViewManager(capacity: 2);
+
+    await manager.switchToSession(
+      'tenant-a',
+      initialUrl: 'https://merchant.example.com',
+    );
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SessionWebViewSwitcher(
+          manager: manager,
+          javascriptMode: JavascriptMode.unrestricted,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final FakePlatformWebView view =
+        fakePlatformViewsController.createdViews.last;
+    view.fakeOnPageFinishedCallback();
+    await tester.pump();
+    view.storage['localStorage']!['token'] = 'A-TOKEN';
+    _fakeCookieManager.setCookiesForDomain(
+      'merchant.example.com',
+      <WebViewCookie>[
+        const WebViewCookie(
+          name: 'sid',
+          value: 'cookie-a',
+          domain: 'merchant.example.com',
+        ),
+      ],
+    );
+    await manager.captureSession('tenant-a');
+
+    await manager.clearAllSessions();
+
+    expect(manager.currentSessionKey, isNull);
+    expect(manager.residentSessionKeys, isEmpty);
+    expect(view.storage['localStorage'], isEmpty);
+    expect(
+      _fakeCookieManager.getCookiesForDomain('merchant.example.com'),
+      isEmpty,
+    );
+    expect(await manager.restoreSession('tenant-a'), isNull);
+  });
+
+  testWidgets('SessionWebViewManager restores from session store after restart',
+      (WidgetTester tester) async {
+    final MemorySessionWebViewSessionStore store =
+        MemorySessionWebViewSessionStore();
+    await store.write(
+      SessionSnapshot(
+        sessionKey: 'tenant-a',
+        cookies: const <WebViewCookie>[
+          WebViewCookie(
+            name: 'sid',
+            value: 'cookie-a',
+            domain: 'merchant.example.com',
+          ),
+        ],
+        cookieDomains: const <String>['merchant.example.com'],
+        localStorage: const <String, String>{'token': 'A-TOKEN'},
+        sessionStorage: const <String, String>{'tenant': 'tenant-a'},
+        lastUrl: 'https://merchant.example.com',
+        updatedAt: DateTime.fromMillisecondsSinceEpoch(1),
+      ),
+    );
+
+    FakePlatformWebView.resetSharedStorage();
+    _fakeCookieManager.reset();
+
+    final SessionWebViewManager restartedManager = SessionWebViewManager(
+      capacity: 2,
+      sessionStore: store,
+    );
+    await restartedManager.switchToSession(
+      'tenant-a',
+      initialUrl: 'https://merchant.example.com',
+    );
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SessionWebViewSwitcher(
+          manager: restartedManager,
+          javascriptMode: JavascriptMode.unrestricted,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump();
+
+    final FakePlatformWebView restoredView =
+        fakePlatformViewsController.createdViews.last;
+    expect(restoredView.currentUrl, 'https://merchant.example.com');
+    restoredView.fakeOnPageFinishedCallback();
+    await tester.pump();
+    restoredView.fakeOnPageFinishedCallback();
+    await tester.pump();
+
+    expect(restoredView.storage['localStorage']!['token'], 'A-TOKEN');
+    expect(restoredView.storage['sessionStorage']!['tenant'], 'tenant-a');
+    expect(
+      _fakeCookieManager
+          .getCookiesForDomain('merchant.example.com')
+          .single
+          .value,
+      'cookie-a',
+    );
+  });
+
+  test('FileSessionWebViewSessionStore persists snapshots across instances',
+      () async {
+    final String filePath =
+        '${Directory.systemTemp.path}/flutter_webview_pro_session_test.json';
+    final File file = File(filePath);
+    if (await file.exists()) {
+      await file.delete();
+    }
+
+    await FileSessionWebViewSessionStore(filePath).write(
+      SessionSnapshot(
+        sessionKey: 'tenant-a',
+        cookies: const <WebViewCookie>[
+          WebViewCookie(
+            name: 'sid',
+            value: 'cookie-a',
+            domain: 'merchant.example.com',
+          ),
+        ],
+        cookieDomains: const <String>['merchant.example.com'],
+        localStorage: const <String, String>{'token': 'A-TOKEN'},
+        sessionStorage: const <String, String>{'tenant': 'tenant-a'},
+        lastUrl: 'https://merchant.example.com',
+        updatedAt: DateTime.fromMillisecondsSinceEpoch(1),
+      ),
+    );
+
+    final SessionSnapshot? restored =
+        await FileSessionWebViewSessionStore(filePath).read('tenant-a');
+
+    expect(restored, isNotNull);
+    expect(restored!.cookies.single.value, 'cookie-a');
+    expect(restored.localStorage['token'], 'A-TOKEN');
+    expect(restored.sessionStorage['tenant'], 'tenant-a');
+
+    if (await file.exists()) {
+      await file.delete();
+    }
+  });
+
+  test('FileSessionWebViewSessionStore has a default cache file path', () {
+    final FileSessionWebViewSessionStore store =
+        FileSessionWebViewSessionStore();
+
+    expect(store.filePath, FileSessionWebViewSessionStore.defaultFilePath);
+    expect(
+      store.filePath,
+      contains('${Directory.systemTemp.path}${Platform.pathSeparator}'),
+    );
+    expect(store.filePath, endsWith('session_webview_sessions.json'));
   });
 
   testWidgets('Initial JavaScript channels', (WidgetTester tester) async {
@@ -936,6 +1524,9 @@ void main() {
 }
 
 class FakePlatformWebView {
+  static final Map<String, Map<String, String>> _localStorageByOrigin =
+      <String, Map<String, String>>{};
+
   FakePlatformWebView(int? id, Map<dynamic, dynamic> params) {
     if (params.containsKey('initialUrl')) {
       final String? initialUrl = params['initialUrl'];
@@ -964,6 +1555,21 @@ class FakePlatformWebView {
   int currentPosition = -1;
   int amountOfReloadsOnCurrentUrl = 0;
   bool hasCache = true;
+  bool throwOnEvaluateJavascript = false;
+  String? binding;
+  final Map<String, String> _sessionStorage = <String, String>{};
+  Map<String, Map<String, String>> get storage => <String, Map<String, String>>{
+        'localStorage': _localStorage,
+        'sessionStorage': _sessionStorage,
+      };
+
+  Map<String, String> get _localStorage {
+    final String origin = _originForUrl(currentUrl);
+    return _localStorageByOrigin.putIfAbsent(
+      origin,
+      () => <String, String>{},
+    );
+  }
 
   String? get currentUrl => history.isEmpty ? null : history[currentPosition];
   JavascriptMode? javascriptMode;
@@ -1007,7 +1613,8 @@ class FakePlatformWebView {
       case 'currentUrl':
         return Future<String?>.value(currentUrl);
       case 'evaluateJavascript':
-        return Future<dynamic>.value(call.arguments);
+        return Future<dynamic>.value(
+            _evaluateJavascript(call.arguments as String));
       case 'addJavascriptChannels':
         final List<String> channelNames = List<String>.from(call.arguments);
         javascriptChannelNames!.addAll(channelNames);
@@ -1032,7 +1639,7 @@ class FakePlatformWebView {
     };
     final ByteData data = codec
         .encodeMethodCall(MethodCall('javascriptChannelMessage', arguments));
-    ServicesBinding.instance!.defaultBinaryMessenger
+    ServicesBinding.instance.defaultBinaryMessenger
         .handlePlatformMessage(channel.name, data, (ByteData? data) {});
   }
 
@@ -1051,7 +1658,7 @@ class FakePlatformWebView {
     };
     final ByteData data =
         codec.encodeMethodCall(MethodCall('navigationRequest', arguments));
-    ServicesBinding.instance!.defaultBinaryMessenger
+    ServicesBinding.instance.defaultBinaryMessenger
         .handlePlatformMessage(channel.name, data, (ByteData? data) {
       final bool allow = codec.decodeEnvelope(data!);
       if (allow) {
@@ -1068,7 +1675,7 @@ class FakePlatformWebView {
       <dynamic, dynamic>{'url': currentUrl},
     ));
 
-    ServicesBinding.instance!.defaultBinaryMessenger.handlePlatformMessage(
+    ServicesBinding.instance.defaultBinaryMessenger.handlePlatformMessage(
       channel.name,
       data,
       (ByteData? data) {},
@@ -1083,7 +1690,7 @@ class FakePlatformWebView {
       <dynamic, dynamic>{'url': currentUrl},
     ));
 
-    ServicesBinding.instance!.defaultBinaryMessenger.handlePlatformMessage(
+    ServicesBinding.instance.defaultBinaryMessenger.handlePlatformMessage(
       channel.name,
       data,
       (ByteData? data) {},
@@ -1098,7 +1705,7 @@ class FakePlatformWebView {
       <dynamic, dynamic>{'progress': progress},
     ));
 
-    ServicesBinding.instance!.defaultBinaryMessenger
+    ServicesBinding.instance.defaultBinaryMessenger
         .handlePlatformMessage(channel.name, data, (ByteData? data) {});
   }
 
@@ -1108,10 +1715,69 @@ class FakePlatformWebView {
     currentPosition++;
     amountOfReloadsOnCurrentUrl = 0;
   }
+
+  static void clearLocalStorageForDomain(String domain) {
+    _localStorageByOrigin.remove(_originForUrl('https://$domain/'));
+    _localStorageByOrigin.remove(_originForUrl('http://$domain/'));
+  }
+
+  static void seedLocalStorage(String url, Map<String, String> values) {
+    _localStorageByOrigin[_originForUrl(url)] = Map<String, String>.from(
+      values,
+    );
+  }
+
+  static void resetSharedStorage() {
+    _localStorageByOrigin.clear();
+  }
+
+  static String _originForUrl(String? url) {
+    final Uri? uri = url == null ? null : Uri.tryParse(url);
+    if (uri == null || uri.host.isEmpty) {
+      return 'about:blank';
+    }
+    final int? port = uri.hasPort ? uri.port : null;
+    return '${uri.scheme}://${uri.host}${port == null ? '' : ':$port'}';
+  }
+
+  String _evaluateJavascript(String script) {
+    if (throwOnEvaluateJavascript) {
+      throw StateError('WebView is disposed');
+    }
+    if (script.contains('window.__sessionBinding')) {
+      return binding ?? '';
+    }
+    final String storageName =
+        script.contains('"sessionStorage"') ? 'sessionStorage' : 'localStorage';
+    if (script.contains('JSON.stringify(data)')) {
+      return jsonEncode(storage[storageName]);
+    }
+    if (script.contains('storage.clear()')) {
+      final RegExp valuesPattern =
+          RegExp(r'var values = (\{.*\});', dotAll: true);
+      final Match? match = valuesPattern.firstMatch(script);
+      final Map<String, String> target = storage[storageName]!;
+      target.clear();
+      if (match != null) {
+        target.addAll(
+          Map<String, String>.from(
+            (jsonDecode(match.group(1)!) as Map<dynamic, dynamic>)
+                .map((dynamic key, dynamic value) => MapEntry<String, String>(
+                      key.toString(),
+                      value.toString(),
+                    )),
+          ),
+        );
+      }
+      return 'true';
+    }
+    return script;
+  }
 }
 
 class _FakePlatformViewsController {
   FakePlatformWebView? lastCreatedView;
+  final List<FakePlatformWebView> createdViews = <FakePlatformWebView>[];
 
   Future<dynamic> fakePlatformViewsMethodHandler(MethodCall call) {
     switch (call.method) {
@@ -1122,6 +1788,7 @@ class _FakePlatformViewsController {
           args['id'],
           params,
         );
+        createdViews.add(lastCreatedView!);
         return Future<int>.sync(() => 1);
       default:
         return Future<void>.sync(() {});
@@ -1130,6 +1797,8 @@ class _FakePlatformViewsController {
 
   void reset() {
     lastCreatedView = null;
+    createdViews.clear();
+    FakePlatformWebView.resetSharedStorage();
   }
 }
 
@@ -1152,8 +1821,10 @@ class _FakeCookieManager {
   }
 
   bool hasCookies = true;
+  final Map<String, List<WebViewCookie>> cookiesByDomain =
+      <String, List<WebViewCookie>>{};
 
-  Future<bool> onMethodCall(MethodCall call) {
+  Future<dynamic> onMethodCall(MethodCall call) {
     switch (call.method) {
       case 'clearCookies':
         bool hadCookies = false;
@@ -1173,12 +1844,76 @@ class _FakeCookieManager {
         return Future<bool>.sync(() {
           return hadCookies;
         });
+      case 'getCookiesForDomains':
+        final List<String> domains =
+            List<String>.from(call.arguments as List<dynamic>);
+        return Future<List<Map<String, dynamic>>>.sync(() {
+          return domains
+              .expand((String domain) =>
+                  cookiesByDomain[domain] ?? <WebViewCookie>[])
+              .map((WebViewCookie cookie) => cookie.toMap())
+              .toList();
+        });
+      case 'setCookies':
+        final List<dynamic> values =
+            List<dynamic>.from(call.arguments as List<dynamic>);
+        for (final dynamic value in values) {
+          final WebViewCookie cookie =
+              WebViewCookie.fromMap(value as Map<dynamic, dynamic>);
+          final List<WebViewCookie> cookies = cookiesByDomain.putIfAbsent(
+              cookie.domain, () => <WebViewCookie>[]);
+          cookies.removeWhere((WebViewCookie item) => item.name == cookie.name);
+          cookies.add(cookie);
+        }
+        return Future<bool>.sync(() => true);
+      case 'clearWebsiteDataForDomains':
+        final Map<dynamic, dynamic> values =
+            call.arguments as Map<dynamic, dynamic>;
+        final List<String> domains =
+            List<String>.from(values['domains'] as List<dynamic>);
+        final bool includeCookies = values['includeCookies'] as bool? ?? true;
+        final bool includeLocalStorage =
+            values['includeLocalStorage'] as bool? ?? true;
+        if (includeCookies) {
+          for (final String domain in domains) {
+            cookiesByDomain.remove(domain);
+          }
+        }
+        if (includeLocalStorage) {
+          for (final String domain in domains) {
+            FakePlatformWebView.clearLocalStorageForDomain(domain);
+          }
+        }
+        return Future<bool>.sync(() => true);
+      case 'clearWebsiteData':
+        final Map<dynamic, dynamic> values =
+            call.arguments as Map<dynamic, dynamic>;
+        final bool includeCookies = values['includeCookies'] as bool? ?? true;
+        final bool includeLocalStorage =
+            values['includeLocalStorage'] as bool? ?? true;
+        if (includeCookies) {
+          cookiesByDomain.clear();
+          hasCookies = false;
+        }
+        if (includeLocalStorage) {
+          FakePlatformWebView.resetSharedStorage();
+        }
+        return Future<bool>.sync(() => true);
     }
     return Future<bool>.sync(() => true);
   }
 
   void reset() {
     hasCookies = true;
+    cookiesByDomain.clear();
+  }
+
+  void setCookiesForDomain(String domain, List<WebViewCookie> cookies) {
+    cookiesByDomain[domain] = List<WebViewCookie>.from(cookies);
+  }
+
+  List<WebViewCookie> getCookiesForDomain(String domain) {
+    return cookiesByDomain[domain] ?? <WebViewCookie>[];
   }
 }
 
@@ -1207,6 +1942,35 @@ class MyWebViewPlatform implements WebViewPlatform {
 
   @override
   Future<bool> clearCookiesForDomains(List<String> domains) {
+    return Future<bool>.sync(() => true);
+  }
+
+  @override
+  Future<bool> clearWebsiteDataForDomains(
+    List<String> domains, {
+    bool includeCookies = true,
+    bool includeLocalStorage = true,
+    bool includeCache = true,
+  }) {
+    return Future<bool>.sync(() => true);
+  }
+
+  @override
+  Future<List<WebViewCookie>> getCookiesForDomains(List<String> domains) {
+    return Future<List<WebViewCookie>>.sync(() => <WebViewCookie>[]);
+  }
+
+  @override
+  Future<void> setCookies(List<WebViewCookie> cookies) {
+    return Future<void>.sync(() {});
+  }
+
+  @override
+  Future<bool> clearWebsiteData({
+    bool includeCookies = true,
+    bool includeLocalStorage = true,
+    bool includeCache = true,
+  }) {
     return Future<bool>.sync(() => true);
   }
 }

@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -15,6 +16,8 @@ import 'platform_interface.dart';
 import 'src/webview_android.dart';
 import 'src/webview_cupertino.dart';
 import 'src/webview_method_channel.dart';
+
+export 'src/session_webview_manager.dart';
 
 /// Optional callback invoked when a web view is first created. [controller] is
 /// the [WebViewController] for the created web view.
@@ -808,6 +811,61 @@ class WebViewController {
   Future<int> getScrollY() {
     return _webViewPlatformController.getScrollY();
   }
+
+  /// Captures the current page's localStorage.
+  Future<Map<String, String>> captureLocalStorage() {
+    return _captureStorage('localStorage');
+  }
+
+  /// Captures the current page's sessionStorage.
+  Future<Map<String, String>> captureSessionStorage() {
+    return _captureStorage('sessionStorage');
+  }
+
+  /// Restores localStorage into the current page.
+  Future<void> restoreLocalStorage(Map<String, String> storage) {
+    return _restoreStorage('localStorage', storage);
+  }
+
+  /// Restores sessionStorage into the current page.
+  Future<void> restoreSessionStorage(Map<String, String> storage) {
+    return _restoreStorage('sessionStorage', storage);
+  }
+
+  Future<Map<String, String>> _captureStorage(String storageName) async {
+    final String storageKey = jsonEncode(storageName);
+    final String result = await evaluateJavascript('''
+      (function() {
+        var storage = window[$storageKey];
+        var data = {};
+        for (var i = 0; i < storage.length; i++) {
+          var key = storage.key(i);
+          data[key] = storage.getItem(key);
+        }
+        return JSON.stringify(data);
+      })();
+    ''');
+    return _decodeStringMap(result);
+  }
+
+  Future<void> _restoreStorage(
+    String storageName,
+    Map<String, String> storage,
+  ) async {
+    final String storageKey = jsonEncode(storageName);
+    final String encoded = jsonEncode(storage);
+    await evaluateJavascript('''
+      (function() {
+        var storage = window[$storageKey];
+        storage.clear();
+        var values = $encoded;
+        Object.keys(values).forEach(function(key) {
+          storage.setItem(key, values[key]);
+        });
+        return true;
+      })();
+    ''');
+  }
 }
 
 /// Manages cookies pertaining to all [WebView]s.
@@ -836,6 +894,14 @@ class CookieManager {
   Future<bool> clearCookiesForDomains(List<String> domains) =>
       WebView.platform.clearCookiesForDomains(domains);
 
+  /// Returns cookies for the specified domains.
+  Future<List<WebViewCookie>> getCookiesForDomains(List<String> domains) =>
+      WebView.platform.getCookiesForDomains(domains);
+
+  /// Restores cookies into the current shared cookie store.
+  Future<void> setCookies(List<WebViewCookie> cookies) =>
+      WebView.platform.setCookies(cookies);
+
   /// Clears cookies, local storage, and cache data for the specified domains.
   ///
   /// This is a no op on iOS version smaller than 9.
@@ -854,6 +920,21 @@ class CookieManager {
         includeLocalStorage: includeLocalStorage,
         includeCache: includeCache,
       );
+
+  /// Clears global WebView cookies, local storage, and cache data.
+  ///
+  /// Use this for app-level logout when every WebView page should require
+  /// authentication again on next entry.
+  Future<bool> clearWebsiteData({
+    bool includeCookies = true,
+    bool includeLocalStorage = true,
+    bool includeCache = true,
+  }) =>
+      WebView.platform.clearWebsiteData(
+        includeCookies: includeCookies,
+        includeLocalStorage: includeLocalStorage,
+        includeCache: includeCache,
+      );
 }
 
 // Throws an ArgumentError if `url` is not a valid URL string.
@@ -866,4 +947,20 @@ void _validateUrlString(String url) {
   } on FormatException catch (e) {
     throw ArgumentError(e);
   }
+}
+
+Map<String, String> _decodeStringMap(String value) {
+  dynamic decoded = jsonDecode(value);
+  if (decoded is String) {
+    decoded = jsonDecode(decoded);
+  }
+  if (decoded is! Map) {
+    return <String, String>{};
+  }
+  return decoded.map<String, String>((dynamic key, dynamic val) {
+    return MapEntry<String, String>(
+      key.toString(),
+      val?.toString() ?? '',
+    );
+  });
 }

@@ -21,10 +21,73 @@
     [self clearCookies:result];
   } else if ([[call method] isEqualToString:@"clearCookiesForDomains"]) {
     [self clearCookiesForDomains:[call arguments] result:result];
+  } else if ([[call method] isEqualToString:@"getCookiesForDomains"]) {
+    [self getCookiesForDomains:[call arguments] result:result];
+  } else if ([[call method] isEqualToString:@"setCookies"]) {
+    [self setCookies:[call arguments] result:result];
   } else if ([[call method] isEqualToString:@"clearWebsiteDataForDomains"]) {
     [self clearWebsiteDataForDomains:[call arguments] result:result];
+  } else if ([[call method] isEqualToString:@"clearWebsiteData"]) {
+    [self clearWebsiteData:[call arguments] result:result];
   } else {
     result(FlutterMethodNotImplemented);
+  }
+}
+
+- (void)getCookiesForDomains:(NSArray *)domains result:(FlutterResult)result {
+  if (@available(iOS 11.0, *)) {
+    WKWebsiteDataStore *dataStore = [WKWebsiteDataStore defaultDataStore];
+    WKHTTPCookieStore *cookieStore = dataStore.httpCookieStore;
+
+    [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+      NSMutableArray<NSDictionary *> *matchedCookies = [NSMutableArray array];
+      for (NSHTTPCookie *cookie in cookies) {
+        for (id domainValue in domains) {
+          if (![domainValue isKindOfClass:[NSString class]]) {
+            continue;
+          }
+          NSString *domain = [self normalizedHost:domainValue];
+          if (domain.length == 0) {
+            continue;
+          }
+          if ([self cookie:cookie matchesDomain:domain]) {
+            [matchedCookies addObject:[self serializeCookie:cookie]];
+            break;
+          }
+        }
+      }
+      result(matchedCookies);
+    }];
+  } else {
+    result(@[]);
+  }
+}
+
+- (void)setCookies:(NSArray *)cookies result:(FlutterResult)result {
+  if (@available(iOS 11.0, *)) {
+    WKWebsiteDataStore *dataStore = [WKWebsiteDataStore defaultDataStore];
+    WKHTTPCookieStore *cookieStore = dataStore.httpCookieStore;
+    dispatch_group_t group = dispatch_group_create();
+
+    for (id value in cookies) {
+      if (![value isKindOfClass:[NSDictionary class]]) {
+        continue;
+      }
+      NSHTTPCookie *cookie = [self deserializeCookie:value];
+      if (cookie == nil) {
+        continue;
+      }
+      dispatch_group_enter(group);
+      [cookieStore setCookie:cookie completionHandler:^{
+        dispatch_group_leave(group);
+      }];
+    }
+
+    dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+      result(nil);
+    });
+  } else {
+    result(nil);
   }
 }
 
@@ -164,6 +227,56 @@
   }
 }
 
+- (void)clearWebsiteData:(NSDictionary *)options result:(FlutterResult)result {
+  if (@available(iOS 9.0, *)) {
+    if (![options isKindOfClass:[NSDictionary class]]) {
+      result([FlutterError errorWithCode:@"invalid_arguments"
+                                 message:@"Expected a map of website data options"
+                                 details:nil]);
+      return;
+    }
+
+    BOOL includeCookies = [self boolValue:options[@"includeCookies"] defaultValue:YES];
+    BOOL includeLocalStorage = [self boolValue:options[@"includeLocalStorage"] defaultValue:YES];
+    BOOL includeCache = [self boolValue:options[@"includeCache"] defaultValue:YES];
+    NSMutableSet<NSString *> *dataTypes = [NSMutableSet set];
+    if (includeCookies) {
+      [dataTypes addObject:WKWebsiteDataTypeCookies];
+    }
+    if (includeLocalStorage) {
+      [dataTypes addObject:WKWebsiteDataTypeLocalStorage];
+      [dataTypes addObject:WKWebsiteDataTypeSessionStorage];
+      [dataTypes addObject:WKWebsiteDataTypeIndexedDBDatabases];
+      [dataTypes addObject:WKWebsiteDataTypeWebSQLDatabases];
+    }
+    if (includeCache) {
+      [dataTypes addObject:WKWebsiteDataTypeDiskCache];
+      [dataTypes addObject:WKWebsiteDataTypeMemoryCache];
+    }
+    if (dataTypes.count == 0) {
+      result(@(NO));
+      return;
+    }
+
+    WKWebsiteDataStore *dataStore = [WKWebsiteDataStore defaultDataStore];
+    [dataStore fetchDataRecordsOfTypes:dataTypes completionHandler:^(NSArray<WKWebsiteDataRecord *> *records) {
+      BOOL hadData = records.count > 0;
+      if (!hadData) {
+        result(@(NO));
+        return;
+      }
+      [dataStore removeDataOfTypes:dataTypes
+                    forDataRecords:records
+                 completionHandler:^{
+                   result(@(YES));
+                 }];
+    }];
+  } else {
+    NSLog(@"Clearing website data is not supported for Flutter WebViews prior to iOS 9.");
+    result(@(NO));
+  }
+}
+
 - (NSString *)normalizedHost:(NSString *)domain {
   NSURLComponents *components = [NSURLComponents componentsWithString:domain];
   if (components.host.length > 0) {
@@ -194,6 +307,58 @@
     return [value boolValue];
   }
   return defaultValue;
+}
+
+- (NSDictionary *)serializeCookie:(NSHTTPCookie *)cookie {
+  NSMutableDictionary *map = [NSMutableDictionary dictionary];
+  map[@"name"] = cookie.name ?: @"";
+  map[@"value"] = cookie.value ?: @"";
+  map[@"domain"] = cookie.domain ?: @"";
+  map[@"path"] = cookie.path ?: @"/";
+  map[@"isSecure"] = @(cookie.secure);
+  map[@"isHttpOnly"] = @([self cookieIsHttpOnly:cookie]);
+  if (cookie.expiresDate != nil) {
+    map[@"expiresDate"] = @((long long)(cookie.expiresDate.timeIntervalSince1970 * 1000));
+  } else {
+    map[@"expiresDate"] = [NSNull null];
+  }
+  return map;
+}
+
+- (NSHTTPCookie *)deserializeCookie:(NSDictionary *)value {
+  NSString *name = value[@"name"];
+  NSString *domain = value[@"domain"];
+  if (name.length == 0 || domain.length == 0) {
+    return nil;
+  }
+
+  NSMutableDictionary<NSHTTPCookiePropertyKey, id> *properties =
+      [NSMutableDictionary dictionary];
+  properties[NSHTTPCookieName] = name;
+  properties[NSHTTPCookieValue] = value[@"value"] ?: @"";
+  properties[NSHTTPCookieDomain] = [self normalizedHost:domain];
+  properties[NSHTTPCookiePath] = value[@"path"] ?: @"/";
+
+  if ([value[@"isSecure"] boolValue]) {
+    properties[NSHTTPCookieSecure] = @"TRUE";
+  }
+  if ([value[@"isHttpOnly"] boolValue]) {
+    properties[@"HttpOnly"] = @"TRUE";
+  }
+  id expiresDate = value[@"expiresDate"];
+  if ([expiresDate isKindOfClass:[NSNumber class]]) {
+    NSTimeInterval interval = [expiresDate doubleValue] / 1000.0;
+    properties[NSHTTPCookieExpires] = [NSDate dateWithTimeIntervalSince1970:interval];
+  }
+  return [NSHTTPCookie cookieWithProperties:properties];
+}
+
+- (BOOL)cookieIsHttpOnly:(NSHTTPCookie *)cookie {
+  NSString *sameSitePolicy = cookie.properties[@"HttpOnly"];
+  if ([sameSitePolicy isKindOfClass:[NSString class]]) {
+    return [sameSitePolicy caseInsensitiveCompare:@"TRUE"] == NSOrderedSame;
+  }
+  return NO;
 }
 
 @end

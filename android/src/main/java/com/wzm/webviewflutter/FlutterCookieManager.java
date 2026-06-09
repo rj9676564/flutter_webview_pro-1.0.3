@@ -11,9 +11,13 @@ import android.webkit.CookieManager;
 import android.webkit.ValueCallback;
 import android.webkit.WebStorage;
 import android.webkit.WebView;
+import java.text.SimpleDateFormat;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.util.ArrayList;
+import java.util.Date;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -43,8 +47,17 @@ class FlutterCookieManager implements MethodCallHandler {
       case "clearCookiesForDomains":
         clearCookiesForDomains(methodCall.arguments, result);
         break;
+      case "getCookiesForDomains":
+        getCookiesForDomains(methodCall.arguments, result);
+        break;
+      case "setCookies":
+        setCookies(methodCall.arguments, result);
+        break;
       case "clearWebsiteDataForDomains":
         clearWebsiteDataForDomains(methodCall.arguments, result);
+        break;
+      case "clearWebsiteData":
+        clearWebsiteData(methodCall.arguments, result);
         break;
       default:
         result.notImplemented();
@@ -91,6 +104,7 @@ class FlutterCookieManager implements MethodCallHandler {
       }
       hadCookies |= clearCookiesForHost(cookieManager, host);
     }
+    flushCookies(cookieManager);
 
     result.success(hadCookies);
   }
@@ -137,6 +151,84 @@ class FlutterCookieManager implements MethodCallHandler {
         });
   }
 
+  private void clearWebsiteData(final Object arguments, final Result result) {
+    if (!(arguments instanceof Map)) {
+      result.error("invalid_arguments", "Expected a map of website data options", null);
+      return;
+    }
+
+    final Map<?, ?> options = (Map<?, ?>) arguments;
+    final boolean includeCookies = readBoolean(options, "includeCookies", true);
+    final boolean includeLocalStorage = readBoolean(options, "includeLocalStorage", true);
+    final boolean includeCache = readBoolean(options, "includeCache", true);
+
+    boolean hadData = false;
+    if (includeCookies) {
+      CookieManager cookieManager = CookieManager.getInstance();
+      hadData |= cookieManager.hasCookies();
+      if (Build.VERSION.SDK_INT >= VERSION_CODES.LOLLIPOP) {
+        cookieManager.removeAllCookies(null);
+      } else {
+        cookieManager.removeAllCookie();
+      }
+      flushCookies(cookieManager);
+    }
+    if (includeLocalStorage) {
+      WebStorage.getInstance().deleteAllData();
+      hadData = true;
+    }
+    if (includeCache) {
+      hadData |= clearHttpCache();
+    }
+    result.success(hadData);
+  }
+
+  private static void getCookiesForDomains(final Object arguments, final Result result) {
+    if (!(arguments instanceof List)) {
+      result.error("invalid_arguments", "Expected a list of domains", null);
+      return;
+    }
+
+    CookieManager cookieManager = CookieManager.getInstance();
+    final Set<String> hosts = normalizedHosts((List<?>) arguments);
+    List<Map<String, Object>> cookies = new ArrayList<>();
+    for (String host : hosts) {
+      cookies.addAll(readCookiesForHost(cookieManager, host));
+    }
+    result.success(cookies);
+  }
+
+  private static void setCookies(final Object arguments, final Result result) {
+    if (!(arguments instanceof List)) {
+      result.error("invalid_arguments", "Expected a list of cookies", null);
+      return;
+    }
+
+    CookieManager cookieManager = CookieManager.getInstance();
+    final List<?> cookieList = (List<?>) arguments;
+    for (Object cookieValue : cookieList) {
+      if (!(cookieValue instanceof Map)) {
+        continue;
+      }
+      @SuppressWarnings("unchecked")
+      Map<String, Object> cookie = (Map<String, Object>) cookieValue;
+      String domain = stringValue(cookie.get("domain"));
+      String name = stringValue(cookie.get("name"));
+      if (domain == null || domain.isEmpty() || name == null || name.isEmpty()) {
+        continue;
+      }
+      String host = normalizeHost(domain);
+      if (host == null || host.isEmpty()) {
+        continue;
+      }
+      String scheme = Boolean.TRUE.equals(cookie.get("isSecure")) ? "https" : "http";
+      String url = scheme + "://" + host + "/";
+      cookieManager.setCookie(url, buildCookieHeader(cookie, host));
+    }
+    flushCookies(cookieManager);
+    result.success(null);
+  }
+
   private boolean clearWebsiteDataForHosts(
       Set<String> hosts,
       boolean includeCookies,
@@ -147,6 +239,7 @@ class FlutterCookieManager implements MethodCallHandler {
       for (String host : hosts) {
         hadData |= clearCookiesForHost(cookieManager, host);
       }
+      flushCookies(cookieManager);
     }
     if (includeCache) {
       hadData |= clearHttpCache();
@@ -157,6 +250,7 @@ class FlutterCookieManager implements MethodCallHandler {
   private static boolean clearCookiesForHost(CookieManager cookieManager, String host) {
     boolean hadCookies = false;
     String[] schemes = new String[] {"https", "http"};
+    final Set<String> domainsToExpire = cookieDomainVariants(host);
     for (String scheme : schemes) {
       String url = scheme + "://" + host + "/";
       String cookieHeader = cookieManager.getCookie(url);
@@ -175,15 +269,98 @@ class FlutterCookieManager implements MethodCallHandler {
           continue;
         }
         String name = cookie.substring(0, equalsIndex);
-        String expiredCookie = String.format(
-            Locale.US,
-            "%s=; Max-Age=0; Path=/; Domain=%s",
-            name,
-            host);
-        cookieManager.setCookie(url, expiredCookie);
+        cookieManager.setCookie(
+            url,
+            String.format(
+                Locale.US,
+                "%s=; Max-Age=0; Path=/",
+                name));
+        for (String domain : domainsToExpire) {
+          String expiredCookie = String.format(
+              Locale.US,
+              "%s=; Max-Age=0; Path=/; Domain=%s",
+              name,
+              domain);
+          cookieManager.setCookie(url, expiredCookie);
+          cookieManager.setCookie(
+              url,
+              String.format(
+                  Locale.US,
+                  "%s=; Max-Age=0; Path=/; Domain=.%s",
+                  name,
+                  domain));
+        }
       }
     }
     return hadCookies;
+  }
+
+  private static Set<String> cookieDomainVariants(String host) {
+    final LinkedHashSet<String> domains = new LinkedHashSet<>();
+    if (host == null || host.isEmpty()) {
+      return domains;
+    }
+    final String[] parts = host.split("\\.");
+    for (int index = 0; index < parts.length - 1; index++) {
+      final StringBuilder builder = new StringBuilder();
+      for (int partIndex = index; partIndex < parts.length; partIndex++) {
+        if (builder.length() > 0) {
+          builder.append('.');
+        }
+        builder.append(parts[partIndex]);
+      }
+      final String domain = builder.toString();
+      if (!domain.isEmpty()) {
+        domains.add(domain);
+      }
+    }
+    return domains;
+  }
+
+  private static List<Map<String, Object>> readCookiesForHost(
+      CookieManager cookieManager, String host) {
+    List<Map<String, Object>> cookies = new ArrayList<>();
+    Set<String> seenNames = new HashSet<>();
+    String[] schemes = new String[] {"https", "http"};
+    for (String scheme : schemes) {
+      String url = scheme + "://" + host + "/";
+      String cookieHeader = cookieManager.getCookie(url);
+      if (cookieHeader == null || cookieHeader.isEmpty()) {
+        continue;
+      }
+      String[] cookieEntries = cookieHeader.split(";");
+      for (String rawCookie : cookieEntries) {
+        String cookie = rawCookie.trim();
+        if (cookie.isEmpty()) {
+          continue;
+        }
+        int equalsIndex = cookie.indexOf('=');
+        if (equalsIndex <= 0) {
+          continue;
+        }
+        String name = cookie.substring(0, equalsIndex);
+        if (seenNames.contains(name)) {
+          continue;
+        }
+        seenNames.add(name);
+        Map<String, Object> cookieMap = new java.util.HashMap<>();
+        cookieMap.put("name", name);
+        cookieMap.put("value", cookie.substring(equalsIndex + 1));
+        cookieMap.put("domain", host);
+        cookieMap.put("path", "/");
+        cookieMap.put("isSecure", scheme.equals("https"));
+        cookieMap.put("isHttpOnly", false);
+        cookieMap.put("expiresDate", null);
+        cookies.add(cookieMap);
+      }
+    }
+    return cookies;
+  }
+
+  private static void flushCookies(CookieManager cookieManager) {
+    if (Build.VERSION.SDK_INT >= VERSION_CODES.LOLLIPOP) {
+      cookieManager.flush();
+    }
   }
 
   private static String normalizeHost(String domain) {
@@ -215,6 +392,44 @@ class FlutterCookieManager implements MethodCallHandler {
   private static boolean readBoolean(Map<?, ?> options, String key, boolean defaultValue) {
     Object value = options.get(key);
     return value instanceof Boolean ? (Boolean) value : defaultValue;
+  }
+
+  private static String stringValue(Object value) {
+    return value == null ? null : value.toString();
+  }
+
+  private static String buildCookieHeader(Map<String, Object> cookie, String host) {
+    StringBuilder builder = new StringBuilder();
+    builder.append(stringValue(cookie.get("name")))
+        .append("=")
+        .append(stringValue(cookie.get("value")));
+
+    if (host != null && !host.isEmpty()) {
+      builder.append("; Domain=").append(host);
+    }
+
+    String path = stringValue(cookie.get("path"));
+    builder.append("; Path=").append(path == null || path.isEmpty() ? "/" : path);
+
+    if (Boolean.TRUE.equals(cookie.get("isSecure"))) {
+      builder.append("; Secure");
+    }
+    if (Boolean.TRUE.equals(cookie.get("isHttpOnly"))) {
+      builder.append("; HttpOnly");
+    }
+
+    Object expiresDate = cookie.get("expiresDate");
+    if (expiresDate instanceof Number) {
+      builder.append("; Expires=").append(formatExpires(((Number) expiresDate).longValue()));
+    }
+    return builder.toString();
+  }
+
+  private static String formatExpires(long timestampMillis) {
+    SimpleDateFormat format =
+        new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.US);
+    format.setTimeZone(java.util.TimeZone.getTimeZone("GMT"));
+    return format.format(new Date(timestampMillis));
   }
 
   private static void clearLocalStorageForHosts(
