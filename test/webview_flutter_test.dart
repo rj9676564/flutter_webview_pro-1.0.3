@@ -968,6 +968,59 @@ void main() {
     );
   });
 
+  testWidgets(
+      'SessionWebViewManager reopens disposed session from initialUrl by default',
+      (WidgetTester tester) async {
+    final SessionWebViewManager manager = SessionWebViewManager(capacity: 2);
+
+    await manager.switchToSession(
+      'tenant-a',
+      initialUrl: 'https://merchant.example.com/a',
+    );
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SessionWebViewSwitcher(
+          manager: manager,
+          javascriptMode: JavascriptMode.unrestricted,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final FakePlatformWebView firstView =
+        fakePlatformViewsController.createdViews.last;
+    firstView.fakeOnPageFinishedCallback();
+    await tester.pump();
+
+    firstView.fakeNavigate('https://merchant.example.com/b');
+    firstView.fakeOnPageStartedCallback();
+    firstView.fakeOnPageFinishedCallback();
+    await tester.pump();
+
+    firstView.fakeNavigate('https://merchant.example.com/c');
+    firstView.fakeOnPageStartedCallback();
+    firstView.fakeOnPageFinishedCallback();
+    await tester.pump();
+
+    expect(firstView.currentUrl, 'https://merchant.example.com/c');
+
+    await manager.captureSession('tenant-a');
+    await manager.disposeSession('tenant-a');
+
+    await manager.switchToSession(
+      'tenant-a',
+      initialUrl: 'https://merchant.example.com/a',
+    );
+    await tester.pump();
+    await tester.pump();
+
+    final FakePlatformWebView reopenedView =
+        fakePlatformViewsController.createdViews.last;
+    expect(reopenedView, isNot(same(firstView)));
+    expect(reopenedView.currentUrl, 'https://merchant.example.com/a');
+  });
+
   test('FileSessionWebViewSessionStore persists snapshots across instances',
       () async {
     final String filePath =

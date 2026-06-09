@@ -315,6 +315,7 @@ class SessionWebViewManager extends ChangeNotifier {
   /// Creates a new [SessionWebViewManager].
   SessionWebViewManager({
     this.capacity = 3,
+    this.restoreLastUrlOnReopen = false,
     this.additionalCookieDomains,
     SessionWebViewSessionStore? sessionStore,
     this.sessionBindingCapture,
@@ -325,6 +326,13 @@ class SessionWebViewManager extends ChangeNotifier {
   ///
   /// When the pool is full, the least recently used non-active session is evicted.
   final int capacity;
+
+  /// Whether reopening a disposed session should navigate to the last captured
+  /// URL instead of the newly provided `initialUrl`.
+  ///
+  /// When false, cookies and web storage are still restored, but the reopened
+  /// WebView starts from the caller-provided entry URL.
+  final bool restoreLastUrlOnReopen;
 
   /// Additional cookie domains that should be captured/restored for every
   /// session in addition to the host parsed from `initialUrl`.
@@ -627,7 +635,9 @@ class SessionWebViewManager extends ChangeNotifier {
       final bool sharedStateMatches = _sharedSessionStateKey == sessionKey;
       entry.restoreState = _SessionRestoreState(
         snapshot: entry.snapshot!,
-        targetUrl: entry.snapshot!.lastUrl ?? initialUrl,
+        targetUrl: restoreLastUrlOnReopen
+            ? (entry.snapshot!.lastUrl ?? initialUrl)
+            : initialUrl,
         resetBeforeRestore: !sharedStateMatches,
         restoreCookies: !sharedStateMatches,
         restoreLocalStorage: !sharedStateMatches,
