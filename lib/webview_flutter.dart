@@ -220,6 +220,7 @@ class WebView extends StatefulWidget {
     Key? key,
     this.onWebViewCreated,
     this.initialUrl,
+    this.sessionKey,
     this.javascriptMode = JavascriptMode.disabled,
     this.javascriptChannels,
     this.navigationDelegate,
@@ -289,6 +290,10 @@ class WebView extends StatefulWidget {
 
   /// The initial URL to load.
   final String? initialUrl;
+
+  /// Optional logical session key used by platform implementations to isolate
+  /// in-memory session state.
+  final String? sessionKey;
 
   /// Whether Javascript execution is enabled.
   final JavascriptMode javascriptMode;
@@ -485,6 +490,7 @@ class _WebViewState extends State<WebView> {
 CreationParams _creationParamsfromWidget(WebView widget) {
   return CreationParams(
     initialUrl: widget.initialUrl,
+    sessionKey: widget.sessionKey,
     webSettings: _webSettingsFromWidget(widget),
     javascriptChannelNames: _extractChannelNames(widget.javascriptChannels),
     userAgent: widget.userAgent,

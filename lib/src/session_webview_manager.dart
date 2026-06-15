@@ -562,6 +562,7 @@ class SessionWebViewManager extends ChangeNotifier {
     final _SessionWebViewEntry entry = _entries[sessionKey]!;
     return WebView(
       key: entry.widgetKey,
+      sessionKey: sessionKey,
       javascriptMode: javascriptMode,
       javascriptChannels: javascriptChannels,
       navigationDelegate: navigationDelegate,
@@ -641,8 +642,7 @@ class SessionWebViewManager extends ChangeNotifier {
         resetBeforeRestore: !sharedStateMatches,
         restoreCookies: !sharedStateMatches,
         restoreLocalStorage: !sharedStateMatches,
-        restoreSessionStorage:
-            !sharedStateMatches || entry.snapshot!.sessionStorage.isNotEmpty,
+        restoreSessionStorage: !sharedStateMatches,
       );
     } else {
       entry.restoreState = null;
@@ -683,6 +683,27 @@ class SessionWebViewManager extends ChangeNotifier {
         'sessionKey=$sessionKey hasSnapshot=${entry?.snapshot != null}',
       );
       return entry?.snapshot ?? await sessionStore.read(sessionKey);
+    }
+
+    if (Platform.isIOS) {
+      final String? currentUrl = await _capturePart<String?>(
+        sessionKey: sessionKey,
+        label: 'currentUrl',
+        fallback: null,
+        action: controller.currentUrl,
+      );
+      final SessionSnapshot snapshot = SessionSnapshot(
+        sessionKey: sessionKey,
+        cookies: <WebViewCookie>[],
+        cookieDomains: <String>[],
+        localStorage: <String, String>{},
+        sessionStorage: <String, String>{},
+        lastUrl: currentUrl ?? entry.lastUrl ?? entry.initialUrl,
+        updatedAt: DateTime.now(),
+      );
+      entry.snapshot = snapshot;
+      await sessionStore.write(snapshot);
+      return snapshot;
     }
 
     final SessionSnapshot? previousSnapshot =
@@ -766,85 +787,137 @@ class SessionWebViewManager extends ChangeNotifier {
   void _ignore(Future<void> future) {}
 
   Future<void> _restoreIfNeeded(_SessionWebViewEntry entry) async {
-    final WebViewController? controller = entry.controller;
-    if (controller == null) {
-      return;
-    }
-    final _SessionRestoreState? restoreState = entry.restoreState;
-    if (restoreState != null) {
+    try {
+      final WebViewController? controller = entry.controller;
+      if (controller == null) {
+        return;
+      }
+      if (Platform.isIOS) {
+        final String targetUrl =
+            entry.restoreState?.targetUrl ?? entry.initialUrl;
+        debugPrint(
+            '[SessionWebViewManager] iOS (nonPersistent): loading targetUrl=$targetUrl directly');
+        await controller.loadUrl(targetUrl);
+        return;
+      }
+      final _SessionRestoreState? restoreState = entry.restoreState;
       debugPrint(
-        '[SessionWebViewManager] restoring sessionKey=${entry.sessionKey} '
-        'cookies=${restoreState.snapshot.cookies.length} '
-        'local=${restoreState.snapshot.localStorage.length} '
-        'session=${restoreState.snapshot.sessionStorage.length} '
-        'targetUrl=${restoreState.targetUrl} '
-        'reset=${restoreState.resetBeforeRestore} '
-        'restoreCookies=${restoreState.restoreCookies} '
-        'restoreLocal=${restoreState.restoreLocalStorage} '
-        'restoreSession=${restoreState.restoreSessionStorage}',
-      );
-      if (restoreState.resetBeforeRestore) {
+          '[SessionWebViewManager] _restoreIfNeeded called for sessionKey=${entry.sessionKey} restoreState=${restoreState != null}');
+      if (restoreState != null) {
+        debugPrint(
+          '[SessionWebViewManager] restoring sessionKey=${entry.sessionKey} '
+          'cookies=${restoreState.snapshot.cookies.length} '
+          'local=${restoreState.snapshot.localStorage.length} '
+          'session=${restoreState.snapshot.sessionStorage.length} '
+          'targetUrl=${restoreState.targetUrl} '
+          'reset=${restoreState.resetBeforeRestore} '
+          'restoreCookies=${restoreState.restoreCookies} '
+          'restoreLocal=${restoreState.restoreLocalStorage} '
+          'restoreSession=${restoreState.restoreSessionStorage}',
+        );
+        if (restoreState.resetBeforeRestore) {
+          await _resetSharedSessionState(entry, controller);
+        }
+        if (restoreState.restoreCookies) {
+          // Cookies are restored before the initial navigation so server-side auth
+          // can see the recovered session on the first request.
+          await _cookieManager.setCookies(restoreState.snapshot.cookies);
+        }
+        _sharedSessionStateKey = entry.sessionKey;
+        debugPrint(
+            '[SessionWebViewManager] loading targetUrl=${restoreState.targetUrl}');
+        await controller.loadUrl(restoreState.targetUrl);
+        debugPrint(
+            '[SessionWebViewManager] loaded targetUrl=${restoreState.targetUrl}');
+        return;
+      }
+      if (_sharedSessionStateKey == entry.sessionKey) {
+        debugPrint(
+          '[SessionWebViewManager] reusing shared state '
+          'sessionKey=${entry.sessionKey} initialUrl=${entry.initialUrl}',
+        );
+      } else if (_sharedSessionStateKey == null) {
+        debugPrint(
+          '[SessionWebViewManager] adopting existing shared state '
+          'sessionKey=${entry.sessionKey} initialUrl=${entry.initialUrl}',
+        );
+      } else {
+        debugPrint(
+          '[SessionWebViewManager] starting clean '
+          'sessionKey=${entry.sessionKey} initialUrl=${entry.initialUrl}',
+        );
         await _resetSharedSessionState(entry, controller);
       }
-      if (restoreState.restoreCookies) {
-        // Cookies are restored before the initial navigation so server-side auth
-        // can see the recovered session on the first request.
-        await _cookieManager.setCookies(restoreState.snapshot.cookies);
-      }
       _sharedSessionStateKey = entry.sessionKey;
-      await controller.loadUrl(restoreState.targetUrl);
-      return;
+      debugPrint(
+          '[SessionWebViewManager] loading initialUrl=${entry.initialUrl}');
+      await controller.loadUrl(entry.initialUrl);
+      debugPrint(
+          '[SessionWebViewManager] loaded initialUrl=${entry.initialUrl}');
+    } catch (e) {
+      debugPrint('[SessionWebViewManager] _restoreIfNeeded error: $e');
     }
-    if (_sharedSessionStateKey == entry.sessionKey) {
-      debugPrint(
-        '[SessionWebViewManager] reusing shared state '
-        'sessionKey=${entry.sessionKey} initialUrl=${entry.initialUrl}',
-      );
-    } else if (_sharedSessionStateKey == null) {
-      debugPrint(
-        '[SessionWebViewManager] adopting existing shared state '
-        'sessionKey=${entry.sessionKey} initialUrl=${entry.initialUrl}',
-      );
-    } else {
-      debugPrint(
-        '[SessionWebViewManager] starting clean '
-        'sessionKey=${entry.sessionKey} initialUrl=${entry.initialUrl}',
-      );
-      await _resetSharedSessionState(entry, controller);
-    }
-    _sharedSessionStateKey = entry.sessionKey;
-    await controller.loadUrl(entry.initialUrl);
   }
 
   Future<void> _onPageFinished(_SessionWebViewEntry entry) async {
     final WebViewController? controller = entry.controller;
     final _SessionRestoreState? restoreState = entry.restoreState;
+    debugPrint(
+        '[SessionWebViewManager] _onPageFinished called for sessionKey=${entry.sessionKey} url=${entry.lastUrl} restoreState=${restoreState != null}');
     if (controller == null) {
       return;
     }
-    if (restoreState == null) {
+    if (Platform.isIOS) {
+      if (restoreState != null) {
+        entry.restoreState = null;
+      }
       await _captureSnapshot(entry.sessionKey);
       return;
     }
+    if (restoreState == null) {
+      debugPrint(
+          '[SessionWebViewManager] _onPageFinished: no restoreState, capturing snapshot');
+      await _captureSnapshot(entry.sessionKey);
+      return;
+    }
+    debugPrint(
+        '[SessionWebViewManager] _onPageFinished: storageRestored=${restoreState.storageRestored}');
     if (!restoreState.storageRestored) {
-      // Storage is written after the first load, then the page is reloaded once
-      // so client-side bootstrap logic can observe the restored values.
       final bool shouldRestoreStorage = restoreState.restoreLocalStorage ||
           restoreState.restoreSessionStorage;
+      debugPrint(
+          '[SessionWebViewManager] _onPageFinished: shouldRestoreStorage=$shouldRestoreStorage');
       if (restoreState.restoreLocalStorage) {
-        await controller.restoreLocalStorage(
-          restoreState.snapshot.localStorage,
-        );
+        debugPrint(
+            '[SessionWebViewManager] _onPageFinished: restoring localStorage');
+        try {
+          await controller.restoreLocalStorage(
+            restoreState.snapshot.localStorage,
+          );
+        } catch (e) {
+          debugPrint('[SessionWebViewManager] restoreLocalStorage failed: $e');
+        }
       }
       if (restoreState.restoreSessionStorage) {
-        await controller.restoreSessionStorage(
-          restoreState.snapshot.sessionStorage,
-        );
+        debugPrint(
+            '[SessionWebViewManager] _onPageFinished: restoring sessionStorage');
+        try {
+          await controller.restoreSessionStorage(
+            restoreState.snapshot.sessionStorage,
+          );
+        } catch (e) {
+          debugPrint(
+              '[SessionWebViewManager] restoreSessionStorage failed: $e');
+        }
       }
       restoreState.storageRestored = true;
       if (shouldRestoreStorage && !restoreState.reloadedAfterRestore) {
         restoreState.reloadedAfterRestore = true;
-        await controller.reload();
+        debugPrint(
+            '[SessionWebViewManager] _onPageFinished: reloading page after delay');
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+        await controller.loadUrl(restoreState.targetUrl);
+        debugPrint('[SessionWebViewManager] _onPageFinished: reload triggered');
         return;
       }
     }
@@ -857,15 +930,26 @@ class SessionWebViewManager extends ChangeNotifier {
         // Retry exactly once with a full cookie/storage rewrite to recover from
         // pages that read state too early during bootstrap.
         await _cookieManager.setCookies(restoreState.snapshot.cookies);
-        await controller
-            .restoreLocalStorage(restoreState.snapshot.localStorage);
-        await controller.restoreSessionStorage(
-          restoreState.snapshot.sessionStorage,
-        );
+        try {
+          await controller
+              .restoreLocalStorage(restoreState.snapshot.localStorage);
+        } catch (e) {
+          debugPrint(
+              '[SessionWebViewManager] retry restoreLocalStorage failed: $e');
+        }
+        try {
+          await controller.restoreSessionStorage(
+            restoreState.snapshot.sessionStorage,
+          );
+        } catch (e) {
+          debugPrint(
+              '[SessionWebViewManager] retry restoreSessionStorage failed: $e');
+        }
         await controller.loadUrl(restoreState.targetUrl);
         return;
       }
     }
+    debugPrint('[SessionWebViewManager] _onPageFinished: completing restore');
     entry.restoreState = null;
     await _captureSnapshot(entry.sessionKey);
   }
@@ -891,17 +975,36 @@ class SessionWebViewManager extends ChangeNotifier {
   ) async {
     final List<String> domains = _cookieDomainsForEntry(entry);
     if (domains.isNotEmpty) {
-      await _cookieManager.clearWebsiteDataForDomains(
-        domains,
-        includeCookies: true,
-        includeLocalStorage: true,
-        includeCache: false,
-      );
+      try {
+        await _cookieManager.clearWebsiteDataForDomains(
+          domains,
+          includeCookies: true,
+          includeLocalStorage: true,
+          includeCache: false,
+        );
+      } catch (e) {
+        debugPrint(
+            '[SessionWebViewManager] clearWebsiteDataForDomains failed: $e');
+      }
     }
     // Domain-scoped localStorage cleanup is handled natively above. Running a
     // JS localStorage.clear() before the target page has loaded can clear the
     // wrong origin or fail on a blank document.
-    await controller.restoreSessionStorage(<String, String>{});
+    try {
+      final String? currentUrl = await controller.currentUrl();
+      if (currentUrl != null &&
+          (currentUrl.startsWith('http://') ||
+              currentUrl.startsWith('https://'))) {
+        await controller.restoreSessionStorage(<String, String>{});
+      } else {
+        debugPrint(
+          '[SessionWebViewManager] skipping sessionStorage reset: '
+          'currentUrl is $currentUrl',
+        );
+      }
+    } catch (e) {
+      debugPrint('[SessionWebViewManager] reset sessionStorage failed: $e');
+    }
   }
 
   List<String> _cookieDomainsForEntry(_SessionWebViewEntry entry) {

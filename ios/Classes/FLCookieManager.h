@@ -9,6 +9,10 @@ NS_ASSUME_NONNULL_BEGIN
 
 @interface FLCookieManager : NSObject <FlutterPlugin>
 
++ (WKWebsiteDataStore *)websiteDataStoreForSessionKey:(NSString *_Nullable)sessionKey;
++ (void)removeWebsiteDataStoreForSessionKey:(NSString *_Nullable)sessionKey;
++ (void)removeAllSessionWebsiteDataStores;
+
 @end
 
 NS_ASSUME_NONNULL_END

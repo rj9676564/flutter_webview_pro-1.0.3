@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #import "FlutterWebView.h"
+#import "FLCookieManager.h"
 #import "FLWKNavigationDelegate.h"
 #import "ProWKProgressionDelegate.h"
 #import "JavaScriptChannelHandler.h"
@@ -66,6 +67,8 @@
   NSMutableSet* _javaScriptChannelNames;
   FLWKNavigationDelegate* _navigationDelegate;
   ProWKProgressionDelegate* _progressionDelegate;
+  NSString* _sessionKey;
+  WKWebsiteDataStore* _websiteDataStore;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame
@@ -87,8 +90,14 @@
     }
 
     NSDictionary<NSString*, id>* settings = args[@"settings"];
+    NSString* sessionKey = [args[@"sessionKey"] isKindOfClass:[NSString class]]
+        ? args[@"sessionKey"]
+        : nil;
+    _sessionKey = sessionKey;
 
     WKWebViewConfiguration* configuration = [[WKWebViewConfiguration alloc] init];
+    _websiteDataStore = [FLCookieManager websiteDataStoreForSessionKey:sessionKey];
+    configuration.websiteDataStore = _websiteDataStore;
     [self applyConfigurationSettings:settings toConfiguration:configuration];
     configuration.userContentController = userContentController;
     [self updateAutoMediaPlaybackPolicy:args[@"autoMediaPlaybackPolicy"]
@@ -110,11 +119,7 @@
       }
     }
 
-      // 添加观察者来观察 canGoBack 属性的变化
     [_webView addObserver:self forKeyPath:@"canGoBack" options:NSKeyValueObservingOptionNew context:nil];
-
-      // 添加观察者来观察 canGoForward 属性的变化
-    [_webView addObserver:self forKeyPath:@"canGoForward" options:NSKeyValueObservingOptionNew context:nil];
     [self applySettings:settings];
     // TODO(amirh): return an error if apply settings failed once it's possible to do so.
     // https://github.com/flutter/flutter/issues/36228
@@ -131,13 +136,7 @@
     if ([keyPath isEqualToString:@"canGoBack"]) {
         BOOL canGoBack = [[change objectForKey:NSKeyValueChangeNewKey] boolValue];
         NSLog(@"OVFK canGoBack: %@", canGoBack ? @"YES" : @"NO");
-        // 这里可以根据 canGoBack 的值执行相应的操作
         self.canGoBack = canGoBack;
-        [_channel invokeMethod:@"onPageFinished" arguments:@{@"url" : _webView.URL.absoluteString}];
-    } else if ([keyPath isEqualToString:@"canGoForward"]) {
-        BOOL canGoForward = [[change objectForKey:NSKeyValueChangeNewKey] boolValue];
-        NSLog(@"OVFK canGoForward: %@", canGoForward ? @"YES" : @"NO");
-        // 这里可以根据 canGoForward 的值执行相应的操作
     } else {
         [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
     }
@@ -146,6 +145,11 @@
 - (void)dealloc {
   if (_progressionDelegate != nil) {
     [_progressionDelegate stopObservingProgress:_webView];
+  }
+  @try {
+    [_webView removeObserver:self forKeyPath:@"canGoBack"];
+  } @catch (NSException *exception) {
+    NSLog(@"removeObserver canGoBack failed: %@", exception);
   }
 }
 
@@ -214,13 +218,11 @@
 }
 
 - (void)onCanGoBack:(FlutterMethodCall*)call result:(FlutterResult)result {
-  BOOL canGoBack = [_webView canGoBack];
-  result([NSNumber numberWithBool:self.canGoBack]);
+  result([NSNumber numberWithBool:[_webView canGoBack]]);
 }
 
 - (void)onCanGoForward:(FlutterMethodCall*)call result:(FlutterResult)result {
-//  BOOL canGoForward = [_webView canGoForward];
-  result([NSNumber numberWithBool:self.canGoBack]);
+  result([NSNumber numberWithBool:[_webView canGoForward]]);
 }
 
 - (void)onGoBack:(FlutterMethodCall*)call result:(FlutterResult)result {
@@ -303,32 +305,24 @@
 }
 
 - (void)clearWebViewCache {
-    // 获取所有网站数据类型
     NSSet* cacheDataTypes = [WKWebsiteDataStore allWebsiteDataTypes];
-    // 获取默认的数据存储
-    WKWebsiteDataStore* dataStore = [WKWebsiteDataStore defaultDataStore];
-    // 设置时间，从1970年开始
+    WKWebsiteDataStore* dataStore = _websiteDataStore ?: _webView.configuration.websiteDataStore;
     NSDate* dateFrom = [NSDate dateWithTimeIntervalSince1970:0];
 
-    // 清除网站数据
     [dataStore removeDataOfTypes:cacheDataTypes
                    modifiedSince:dateFrom
                completionHandler:^{
                    NSLog(@"All website data removed.");
-
-                   // 手动清除 cookies
                    [self clearCookies];
                }];
 }
 
 - (void)clearCookies {
-    WKWebsiteDataStore* dataStore = [WKWebsiteDataStore defaultDataStore];
+    WKWebsiteDataStore* dataStore = _websiteDataStore ?: _webView.configuration.websiteDataStore;
     WKHTTPCookieStore* cookieStore = dataStore.httpCookieStore;
 
-    // 获取所有 cookies
     [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
         for (NSHTTPCookie *cookie in cookies) {
-            // 删除每个 cookie
             [cookieStore deleteCookie:cookie completionHandler:^{
                 NSLog(@"Deleted cookie: %@", cookie.name);
             }];

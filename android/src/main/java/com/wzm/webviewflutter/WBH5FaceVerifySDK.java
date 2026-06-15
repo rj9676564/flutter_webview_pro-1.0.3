@@ -46,7 +46,7 @@ public class WBH5FaceVerifySDK {
         WebSettings webSetting = mWebView.getSettings();
         webSetting.setJavaScriptEnabled(true);
         webSetting.setTextZoom(100);
-        webSetting.setAllowFileAccess(true);
+        webSetting.setAllowFileAccess(false);
         webSetting.setAllowFileAccessFromFileURLs(false);
         webSetting.setAllowUniversalAccessFromFileURLs(false);
         webSetting.setLayoutAlgorithm(WebSettings.LayoutAlgorithm.NARROW_COLUMNS);

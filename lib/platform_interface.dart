@@ -515,6 +515,7 @@ class CreationParams {
   /// The `autoMediaPlaybackPolicy` parameter must not be null.
   CreationParams({
     this.initialUrl,
+    this.sessionKey,
     this.webSettings,
     this.javascriptChannelNames = const <String>{},
     this.userAgent,
@@ -526,6 +527,10 @@ class CreationParams {
   ///
   /// When null the webview will be created without loading any page.
   final String? initialUrl;
+
+  /// Optional logical session key used by platform implementations to isolate
+  /// in-memory session state.
+  final String? sessionKey;
 
   /// The initial [WebSettings] for the new webview.
   ///
@@ -555,7 +560,7 @@ class CreationParams {
 
   @override
   String toString() {
-    return '$runtimeType(initialUrl: $initialUrl, settings: $webSettings, javascriptChannelNames: $javascriptChannelNames, UserAgent: $userAgent)';
+    return '$runtimeType(initialUrl: $initialUrl, sessionKey: $sessionKey, settings: $webSettings, javascriptChannelNames: $javascriptChannelNames, UserAgent: $userAgent)';
   }
 }
 

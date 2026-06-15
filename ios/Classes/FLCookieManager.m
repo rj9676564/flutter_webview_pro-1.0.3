@@ -7,6 +7,64 @@
 @implementation FLCookieManager {
 }
 
+static NSMutableDictionary<NSString *, WKWebsiteDataStore *> *FLSessionWebsiteDataStores(void) {
+  static NSMutableDictionary<NSString *, WKWebsiteDataStore *> *stores = nil;
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    stores = [NSMutableDictionary dictionary];
+  });
+  return stores;
+}
+
+static NSString *const FLSharedAnonymousSessionKey = @"__flutter_webview_pro_shared__";
+
+static NSArray<WKWebsiteDataStore *> *FLAllWebsiteDataStores(void) {
+  NSMutableArray<WKWebsiteDataStore *> *stores =
+      [NSMutableArray arrayWithObject:[WKWebsiteDataStore defaultDataStore]];
+  @synchronized (FLSessionWebsiteDataStores()) {
+    [stores addObjectsFromArray:FLSessionWebsiteDataStores().allValues];
+  }
+  return stores;
+}
+
++ (NSString *)normalizedSessionKey:(NSString *_Nullable)sessionKey {
+  NSString *trimmed = [sessionKey isKindOfClass:[NSString class]]
+      ? [sessionKey stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]]
+      : @"";
+  return trimmed.length > 0 ? trimmed : @"";
+}
+
++ (WKWebsiteDataStore *)websiteDataStoreForSessionKey:(NSString *_Nullable)sessionKey {
+  NSString *normalized = [self normalizedSessionKey:sessionKey];
+  if (normalized.length == 0) {
+    normalized = FLSharedAnonymousSessionKey;
+  }
+  @synchronized (FLSessionWebsiteDataStores()) {
+    WKWebsiteDataStore *store = FLSessionWebsiteDataStores()[normalized];
+    if (store == nil) {
+      store = [WKWebsiteDataStore nonPersistentDataStore];
+      FLSessionWebsiteDataStores()[normalized] = store;
+    }
+    return store;
+  }
+}
+
++ (void)removeWebsiteDataStoreForSessionKey:(NSString *_Nullable)sessionKey {
+  NSString *normalized = [self normalizedSessionKey:sessionKey];
+  if (normalized.length == 0) {
+    return;
+  }
+  @synchronized (FLSessionWebsiteDataStores()) {
+    [FLSessionWebsiteDataStores() removeObjectForKey:normalized];
+  }
+}
+
++ (void)removeAllSessionWebsiteDataStores {
+  @synchronized (FLSessionWebsiteDataStores()) {
+    [FLSessionWebsiteDataStores() removeAllObjects];
+  }
+}
+
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar {
   FLCookieManager *instance = [[FLCookieManager alloc] init];
 
@@ -36,28 +94,38 @@
 
 - (void)getCookiesForDomains:(NSArray *)domains result:(FlutterResult)result {
   if (@available(iOS 11.0, *)) {
-    WKWebsiteDataStore *dataStore = [WKWebsiteDataStore defaultDataStore];
-    WKHTTPCookieStore *cookieStore = dataStore.httpCookieStore;
-
-    [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
-      NSMutableArray<NSDictionary *> *matchedCookies = [NSMutableArray array];
-      for (NSHTTPCookie *cookie in cookies) {
-        for (id domainValue in domains) {
-          if (![domainValue isKindOfClass:[NSString class]]) {
-            continue;
-          }
-          NSString *domain = [self normalizedHost:domainValue];
-          if (domain.length == 0) {
-            continue;
-          }
-          if ([self cookie:cookie matchesDomain:domain]) {
-            [matchedCookies addObject:[self serializeCookie:cookie]];
-            break;
+    __block NSMutableDictionary<NSString *, NSDictionary *> *matchedCookies =
+        [NSMutableDictionary dictionary];
+    dispatch_group_t group = dispatch_group_create();
+    for (WKWebsiteDataStore *dataStore in FLAllWebsiteDataStores()) {
+      WKHTTPCookieStore *cookieStore = dataStore.httpCookieStore;
+      dispatch_group_enter(group);
+      [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+        for (NSHTTPCookie *cookie in cookies) {
+          for (id domainValue in domains) {
+            if (![domainValue isKindOfClass:[NSString class]]) {
+              continue;
+            }
+            NSString *domain = [self normalizedHost:domainValue];
+            if (domain.length == 0) {
+              continue;
+            }
+            if ([self cookie:cookie matchesDomain:domain]) {
+              NSString *cookieKey =
+                  [NSString stringWithFormat:@"%@|%@|%@", cookie.name ?: @"", cookie.domain ?: @"", cookie.path ?: @"/"];
+              @synchronized (matchedCookies) {
+                matchedCookies[cookieKey] = [self serializeCookie:cookie];
+              }
+              break;
+            }
           }
         }
-      }
-      result(matchedCookies);
-    }];
+        dispatch_group_leave(group);
+      }];
+    }
+    dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+      result(matchedCookies.allValues);
+    });
   } else {
     result(@[]);
   }
@@ -65,22 +133,23 @@
 
 - (void)setCookies:(NSArray *)cookies result:(FlutterResult)result {
   if (@available(iOS 11.0, *)) {
-    WKWebsiteDataStore *dataStore = [WKWebsiteDataStore defaultDataStore];
-    WKHTTPCookieStore *cookieStore = dataStore.httpCookieStore;
     dispatch_group_t group = dispatch_group_create();
 
-    for (id value in cookies) {
-      if (![value isKindOfClass:[NSDictionary class]]) {
-        continue;
+    for (WKWebsiteDataStore *dataStore in FLAllWebsiteDataStores()) {
+      WKHTTPCookieStore *cookieStore = dataStore.httpCookieStore;
+      for (id value in cookies) {
+        if (![value isKindOfClass:[NSDictionary class]]) {
+          continue;
+        }
+        NSHTTPCookie *cookie = [self deserializeCookie:value];
+        if (cookie == nil) {
+          continue;
+        }
+        dispatch_group_enter(group);
+        [cookieStore setCookie:cookie completionHandler:^{
+          dispatch_group_leave(group);
+        }];
       }
-      NSHTTPCookie *cookie = [self deserializeCookie:value];
-      if (cookie == nil) {
-        continue;
-      }
-      dispatch_group_enter(group);
-      [cookieStore setCookie:cookie completionHandler:^{
-        dispatch_group_leave(group);
-      }];
     }
 
     dispatch_group_notify(group, dispatch_get_main_queue(), ^{
@@ -94,19 +163,12 @@
 - (void)clearCookies:(FlutterResult)result {
   if (@available(iOS 9.0, *)) {
     NSSet<NSString *> *websiteDataTypes = [NSSet setWithObject:WKWebsiteDataTypeCookies];
-    WKWebsiteDataStore *dataStore = [WKWebsiteDataStore defaultDataStore];
-
-    void (^deleteAndNotify)(NSArray<WKWebsiteDataRecord *> *) =
-        ^(NSArray<WKWebsiteDataRecord *> *cookies) {
-          BOOL hasCookies = cookies.count > 0;
-          [dataStore removeDataOfTypes:websiteDataTypes
-                        forDataRecords:cookies
-                     completionHandler:^{
-                       result(@(hasCookies));
-                     }];
-        };
-
-    [dataStore fetchDataRecordsOfTypes:websiteDataTypes completionHandler:deleteAndNotify];
+    [self clearWebsiteDataInStores:FLAllWebsiteDataStores()
+                         dataTypes:websiteDataTypes
+                        completion:^(BOOL hadData) {
+                          [FLCookieManager removeAllSessionWebsiteDataStores];
+                          result(@(hadData));
+                        }];
   } else {
     // support for iOS8 tracked in https://github.com/flutter/flutter/issues/27624.
     NSLog(@"Clearing cookies is not supported for Flutter WebViews prior to iOS 9.");
@@ -115,35 +177,40 @@
 
 - (void)clearCookiesForDomains:(NSArray *)domains result:(FlutterResult)result {
   if (@available(iOS 9.0, *)) {
-    WKWebsiteDataStore *dataStore = [WKWebsiteDataStore defaultDataStore];
-    WKHTTPCookieStore *cookieStore = dataStore.httpCookieStore;
     __block BOOL hadCookies = NO;
     dispatch_group_t group = dispatch_group_create();
-
-    [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
-      for (NSHTTPCookie *cookie in cookies) {
-        for (id domainValue in domains) {
-          if (![domainValue isKindOfClass:[NSString class]]) {
-            continue;
-          }
-          NSString *domain = [self normalizedHost:domainValue];
-          if (domain.length == 0) {
-            continue;
-          }
-          if ([self cookie:cookie matchesDomain:domain]) {
-            hadCookies = YES;
-            dispatch_group_enter(group);
-            [cookieStore deleteCookie:cookie completionHandler:^{
-              dispatch_group_leave(group);
-            }];
-            break;
+    for (WKWebsiteDataStore *dataStore in FLAllWebsiteDataStores()) {
+      WKHTTPCookieStore *cookieStore = dataStore.httpCookieStore;
+      dispatch_group_enter(group);
+      [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+        dispatch_group_t deleteGroup = dispatch_group_create();
+        for (NSHTTPCookie *cookie in cookies) {
+          for (id domainValue in domains) {
+            if (![domainValue isKindOfClass:[NSString class]]) {
+              continue;
+            }
+            NSString *domain = [self normalizedHost:domainValue];
+            if (domain.length == 0) {
+              continue;
+            }
+            if ([self cookie:cookie matchesDomain:domain]) {
+              hadCookies = YES;
+              dispatch_group_enter(deleteGroup);
+              [cookieStore deleteCookie:cookie completionHandler:^{
+                dispatch_group_leave(deleteGroup);
+              }];
+              break;
+            }
           }
         }
-      }
-      dispatch_group_notify(group, dispatch_get_main_queue(), ^{
-        result(@(hadCookies));
-      });
-    }];
+        dispatch_group_notify(deleteGroup, dispatch_get_main_queue(), ^{
+          dispatch_group_leave(group);
+        });
+      }];
+    }
+    dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+      result(@(hadCookies));
+    });
   } else {
     NSLog(@"Clearing cookies is not supported for Flutter WebViews prior to iOS 9.");
     result(@(NO));
@@ -190,37 +257,43 @@
       return;
     }
 
-    WKWebsiteDataStore *dataStore = [WKWebsiteDataStore defaultDataStore];
-    [dataStore fetchDataRecordsOfTypes:dataTypes completionHandler:^(NSArray<WKWebsiteDataRecord *> *records) {
-      NSMutableArray<WKWebsiteDataRecord *> *matchedRecords = [NSMutableArray array];
-      for (WKWebsiteDataRecord *record in records) {
-        NSString *recordDomain = record.displayName.lowercaseString;
-        for (id domainValue in domains) {
-          if (![domainValue isKindOfClass:[NSString class]]) {
-            continue;
-          }
-          NSString *domain = [self normalizedHost:domainValue];
-          if (domain.length == 0) {
-            continue;
-          }
-          if ([self host:recordDomain matchesDomain:domain]) {
-            [matchedRecords addObject:record];
-            break;
+    __block BOOL hadData = NO;
+    dispatch_group_t group = dispatch_group_create();
+    for (WKWebsiteDataStore *dataStore in FLAllWebsiteDataStores()) {
+      dispatch_group_enter(group);
+      [dataStore fetchDataRecordsOfTypes:dataTypes completionHandler:^(NSArray<WKWebsiteDataRecord *> *records) {
+        NSMutableArray<WKWebsiteDataRecord *> *matchedRecords = [NSMutableArray array];
+        for (WKWebsiteDataRecord *record in records) {
+          NSString *recordDomain = record.displayName.lowercaseString;
+          for (id domainValue in domains) {
+            if (![domainValue isKindOfClass:[NSString class]]) {
+              continue;
+            }
+            NSString *domain = [self normalizedHost:domainValue];
+            if (domain.length == 0) {
+              continue;
+            }
+            if ([self host:recordDomain matchesDomain:domain]) {
+              [matchedRecords addObject:record];
+              break;
+            }
           }
         }
-      }
-
-      BOOL hadData = matchedRecords.count > 0;
-      if (!hadData) {
-        result(@(NO));
-        return;
-      }
-      [dataStore removeDataOfTypes:dataTypes
-                    forDataRecords:matchedRecords
-                 completionHandler:^{
-                   result(@(YES));
-                 }];
-    }];
+        if (matchedRecords.count == 0) {
+          dispatch_group_leave(group);
+          return;
+        }
+        hadData = YES;
+        [dataStore removeDataOfTypes:dataTypes
+                      forDataRecords:matchedRecords
+                   completionHandler:^{
+                     dispatch_group_leave(group);
+                   }];
+      }];
+    }
+    dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+      result(@(hadData));
+    });
   } else {
     NSLog(@"Clearing website data is not supported for Flutter WebViews prior to iOS 9.");
     result(@(NO));
@@ -258,23 +331,43 @@
       return;
     }
 
-    WKWebsiteDataStore *dataStore = [WKWebsiteDataStore defaultDataStore];
-    [dataStore fetchDataRecordsOfTypes:dataTypes completionHandler:^(NSArray<WKWebsiteDataRecord *> *records) {
-      BOOL hadData = records.count > 0;
-      if (!hadData) {
-        result(@(NO));
-        return;
-      }
-      [dataStore removeDataOfTypes:dataTypes
-                    forDataRecords:records
-                 completionHandler:^{
-                   result(@(YES));
-                 }];
+    [self clearWebsiteDataInStores:FLAllWebsiteDataStores() dataTypes:dataTypes completion:^(BOOL hadData) {
+      [FLCookieManager removeAllSessionWebsiteDataStores];
+      result(@(hadData));
     }];
   } else {
     NSLog(@"Clearing website data is not supported for Flutter WebViews prior to iOS 9.");
     result(@(NO));
   }
+}
+
+- (void)clearWebsiteDataInStores:(NSArray<WKWebsiteDataStore *> *)stores
+                       dataTypes:(NSSet<NSString *> *)dataTypes
+                      completion:(void (^)(BOOL hadData))completion {
+  if (stores.count == 0 || dataTypes.count == 0) {
+    completion(NO);
+    return;
+  }
+  __block BOOL hadAnyData = NO;
+  dispatch_group_t group = dispatch_group_create();
+  for (WKWebsiteDataStore *store in stores) {
+    dispatch_group_enter(group);
+    [store fetchDataRecordsOfTypes:dataTypes completionHandler:^(NSArray<WKWebsiteDataRecord *> *records) {
+      if (records.count == 0) {
+        dispatch_group_leave(group);
+        return;
+      }
+      hadAnyData = YES;
+      [store removeDataOfTypes:dataTypes
+                forDataRecords:records
+             completionHandler:^{
+               dispatch_group_leave(group);
+             }];
+    }];
+  }
+  dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+    completion(hadAnyData);
+  });
 }
 
 - (NSString *)normalizedHost:(NSString *)domain {
@@ -290,16 +383,59 @@
   if ([cookieDomain hasPrefix:@"."]) {
     cookieDomain = [cookieDomain substringFromIndex:1];
   }
-  return [cookieDomain isEqualToString:domain] ||
-         [cookieDomain hasSuffix:[NSString stringWithFormat:@".%@", domain]];
+  NSString *normDomain = domain.lowercaseString;
+  if ([normDomain hasPrefix:@"."]) {
+    normDomain = [normDomain substringFromIndex:1];
+  }
+  
+  if ([cookieDomain isEqualToString:normDomain]) {
+    return YES;
+  }
+  
+  // cookieDomain is a subdomain of normDomain (e.g. cookieDomain = sub.shop.example.com, normDomain = shop.example.com)
+  if ([cookieDomain hasSuffix:[NSString stringWithFormat:@".%@", normDomain]]) {
+    return YES;
+  }
+  
+  // cookieDomain is a parent domain of normDomain (e.g. cookieDomain = example.com, normDomain = shop.example.com)
+  if ([normDomain hasSuffix:[NSString stringWithFormat:@".%@", cookieDomain]]) {
+    NSArray *parts = [cookieDomain componentsSeparatedByString:@"."];
+    if (parts.count >= 2) {
+      return YES;
+    }
+  }
+  
+  return NO;
 }
 
 - (BOOL)host:(NSString *)host matchesDomain:(NSString *)domain {
-  if (host.length == 0 || domain.length == 0) {
-    return NO;
+  NSString *normHost = host.lowercaseString;
+  if ([normHost hasPrefix:@"."]) {
+    normHost = [normHost substringFromIndex:1];
   }
-  return [host isEqualToString:domain] ||
-         [host hasSuffix:[NSString stringWithFormat:@".%@", domain]];
+  NSString *normDomain = domain.lowercaseString;
+  if ([normDomain hasPrefix:@"."]) {
+    normDomain = [normDomain substringFromIndex:1];
+  }
+  
+  if ([normHost isEqualToString:normDomain]) {
+    return YES;
+  }
+  
+  // normHost is a subdomain of normDomain
+  if ([normHost hasSuffix:[NSString stringWithFormat:@".%@", normDomain]]) {
+    return YES;
+  }
+  
+  // normHost is a parent domain of normDomain
+  if ([normDomain hasSuffix:[NSString stringWithFormat:@".%@", normHost]]) {
+    NSArray *parts = [normHost componentsSeparatedByString:@"."];
+    if (parts.count >= 2) {
+      return YES;
+    }
+  }
+  
+  return NO;
 }
 
 - (BOOL)boolValue:(id)value defaultValue:(BOOL)defaultValue {

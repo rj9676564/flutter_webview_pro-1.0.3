@@ -375,6 +375,7 @@ public class FlutterWebView implements PlatformView, MethodCallHandler {
         platformThreadHandler = new Handler(context.getMainLooper());
         // Allow local storage.
         webView.getSettings().setDomStorageEnabled(true);
+        webView.getSettings().setAllowFileAccess(false);
         webView.getSettings().setAllowFileAccessFromFileURLs(false);
         webView.getSettings().setAllowUniversalAccessFromFileURLs(false);
         webView.getSettings().setJavaScriptCanOpenWindowsAutomatically(true);
