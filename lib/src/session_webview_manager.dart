@@ -1031,7 +1031,7 @@ class SessionWebViewManager extends ChangeNotifier {
     _SessionWebViewEntry entry,
     WebViewController controller,
   ) async {
-    final List<String> domains = _cookieDomainsForEntry(entry);
+    final List<String> domains = _cookieDomainsForSharedStateReset(entry);
     if (Platform.isIOS) {
       try {
         await _cookieManager.clearWebsiteDataForSession(
@@ -1083,11 +1083,29 @@ class SessionWebViewManager extends ChangeNotifier {
     return domains.toList(growable: false);
   }
 
+  List<String> _cookieDomainsForSharedStateReset(_SessionWebViewEntry entry) {
+    final Set<String> domains = <String>{}..addAll(entry.cookieDomains);
+    final String? sharedSessionStateKey = _sharedSessionStateKey;
+    if (sharedSessionStateKey != null) {
+      final _SessionWebViewEntry? sharedEntry = _entries[sharedSessionStateKey];
+      if (sharedEntry != null) {
+        domains.addAll(sharedEntry.cookieDomains);
+      }
+    }
+    if (additionalCookieDomains != null) {
+      domains.addAll(
+        additionalCookieDomains!
+            .where((String value) => value.trim().isNotEmpty),
+      );
+    }
+    return domains.toList(growable: false);
+  }
+
   void _recordCookieDomain(_SessionWebViewEntry entry, String? url) {
     if (url == null || url.isEmpty) {
       return;
     }
-    final Uri? uri = Uri.tryParse(url);
+    final Uri? uri = _uriForWebUrl(url);
     final String host = uri?.host ?? '';
     if (host.isNotEmpty) {
       entry.cookieDomains.add(host);
@@ -1127,7 +1145,7 @@ class SessionWebViewManager extends ChangeNotifier {
     if (url == null || url.isEmpty) {
       return null;
     }
-    final Uri? uri = Uri.tryParse(url);
+    final Uri? uri = _uriForWebUrl(url);
     if (uri == null ||
         uri.host.isEmpty ||
         (uri.scheme != 'http' && uri.scheme != 'https')) {
@@ -1137,6 +1155,20 @@ class SessionWebViewManager extends ChangeNotifier {
         (uri.scheme == 'https' && uri.port == 443);
     final String port = uri.hasPort && !hasDefaultPort ? ':${uri.port}' : '';
     return '${uri.scheme}://${uri.host}$port';
+  }
+
+  Uri? _uriForWebUrl(String url) {
+    final Uri? parsed = Uri.tryParse(url);
+    if (parsed != null && parsed.host.isNotEmpty) {
+      return parsed;
+    }
+    if (!url.contains('://')) {
+      final Uri? withScheme = Uri.tryParse('http://$url');
+      if (withScheme != null && withScheme.host.isNotEmpty) {
+        return withScheme;
+      }
+    }
+    return parsed;
   }
 
   Future<T> _enqueue<T>(Future<T> Function() action) {

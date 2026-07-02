@@ -632,6 +632,78 @@ void main() {
     );
   });
 
+  testWidgets(
+      'SessionWebViewManager clears previous Android auth domains on switch',
+      (WidgetTester tester) async {
+    final SessionWebViewManager manager = SessionWebViewManager(
+      capacity: 3,
+      platformSupportsMultipleResidentWebViews: false,
+    );
+
+    await manager.switchToSession(
+      'tenant-a',
+      initialUrl: 'd.mrlb.top:23200/shop-a',
+    );
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SessionWebViewSwitcher(
+          manager: manager,
+          javascriptMode: JavascriptMode.unrestricted,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final FakePlatformWebView viewA =
+        fakePlatformViewsController.createdViews.last;
+    viewA.fakeOnPageFinishedCallback();
+    await tester.pump();
+    viewA.storage['localStorage']!['shopToken'] = 'SHOP-A';
+    _fakeCookieManager.setCookiesForDomain(
+      'd.mrlb.top',
+      <WebViewCookie>[
+        const WebViewCookie(
+          name: 'shop_sid',
+          value: 'shop-cookie-a',
+          domain: 'd.mrlb.top',
+        ),
+      ],
+    );
+
+    viewA.fakeNavigate('auth.mrlb.top:23200/login');
+    viewA.fakeOnPageStartedCallback();
+    viewA.fakeOnPageFinishedCallback();
+    await tester.pump();
+    viewA.storage['localStorage']!['authToken'] = 'AUTH-A';
+    _fakeCookieManager.setCookiesForDomain(
+      'auth.mrlb.top',
+      <WebViewCookie>[
+        const WebViewCookie(
+          name: 'auth_sid',
+          value: 'auth-cookie-a',
+          domain: 'auth.mrlb.top',
+        ),
+      ],
+    );
+
+    await manager.switchToSession(
+      'tenant-b',
+      initialUrl: 'd.mrlb.top:23200/shop-b',
+    );
+    await tester.pump();
+    await tester.pump();
+
+    final FakePlatformWebView viewB =
+        fakePlatformViewsController.createdViews.last;
+    viewB.fakeOnPageFinishedCallback();
+    await tester.pump();
+
+    expect(_fakeCookieManager.getCookiesForDomain('d.mrlb.top'), isEmpty);
+    expect(_fakeCookieManager.getCookiesForDomain('auth.mrlb.top'), isEmpty);
+    expect(viewB.storage['localStorage'], isEmpty);
+  });
+
   testWidgets('SessionWebViewManager restores snapshot after LRU eviction',
       (WidgetTester tester) async {
     final SessionWebViewManager manager = SessionWebViewManager(
@@ -2042,8 +2114,10 @@ class FakePlatformWebView {
   }
 
   static void clearLocalStorageForDomain(String domain) {
-    _localStorageByOrigin.remove(_originForUrl('https://$domain/'));
-    _localStorageByOrigin.remove(_originForUrl('http://$domain/'));
+    _localStorageByOrigin.removeWhere((String origin, _) {
+      final Uri? uri = _uriForWebUrl(origin);
+      return uri?.host == domain;
+    });
   }
 
   static void seedLocalStorage(String url, Map<String, String> values) {
@@ -2057,12 +2131,26 @@ class FakePlatformWebView {
   }
 
   static String _originForUrl(String? url) {
-    final Uri? uri = url == null ? null : Uri.tryParse(url);
+    final Uri? uri = url == null ? null : _uriForWebUrl(url);
     if (uri == null || uri.host.isEmpty) {
       return 'about:blank';
     }
     final int? port = uri.hasPort ? uri.port : null;
     return '${uri.scheme}://${uri.host}${port == null ? '' : ':$port'}';
+  }
+
+  static Uri? _uriForWebUrl(String url) {
+    final Uri? parsed = Uri.tryParse(url);
+    if (parsed != null && parsed.host.isNotEmpty) {
+      return parsed;
+    }
+    if (!url.contains('://')) {
+      final Uri? withScheme = Uri.tryParse('http://$url');
+      if (withScheme != null && withScheme.host.isNotEmpty) {
+        return withScheme;
+      }
+    }
+    return parsed;
   }
 
   String _evaluateJavascript(String script) {
