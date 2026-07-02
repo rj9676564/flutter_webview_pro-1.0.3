@@ -16,8 +16,6 @@ static NSMutableDictionary<NSString *, WKWebsiteDataStore *> *FLSessionWebsiteDa
   return stores;
 }
 
-static NSString *const FLSharedAnonymousSessionKey = @"__flutter_webview_pro_shared__";
-
 static NSArray<WKWebsiteDataStore *> *FLAllWebsiteDataStores(void) {
   NSMutableArray<WKWebsiteDataStore *> *stores =
       [NSMutableArray arrayWithObject:[WKWebsiteDataStore defaultDataStore]];
@@ -37,7 +35,7 @@ static NSArray<WKWebsiteDataStore *> *FLAllWebsiteDataStores(void) {
 + (WKWebsiteDataStore *)websiteDataStoreForSessionKey:(NSString *_Nullable)sessionKey {
   NSString *normalized = [self normalizedSessionKey:sessionKey];
   if (normalized.length == 0) {
-    normalized = FLSharedAnonymousSessionKey;
+    return [WKWebsiteDataStore defaultDataStore];
   }
   @synchronized (FLSessionWebsiteDataStores()) {
     WKWebsiteDataStore *store = FLSessionWebsiteDataStores()[normalized];
@@ -81,10 +79,16 @@ static NSArray<WKWebsiteDataStore *> *FLAllWebsiteDataStores(void) {
     [self clearCookiesForDomains:[call arguments] result:result];
   } else if ([[call method] isEqualToString:@"getCookiesForDomains"]) {
     [self getCookiesForDomains:[call arguments] result:result];
+  } else if ([[call method] isEqualToString:@"getCookiesForSession"]) {
+    [self getCookiesForSession:[call arguments] result:result];
   } else if ([[call method] isEqualToString:@"setCookies"]) {
     [self setCookies:[call arguments] result:result];
+  } else if ([[call method] isEqualToString:@"setCookiesForSession"]) {
+    [self setCookiesForSession:[call arguments] result:result];
   } else if ([[call method] isEqualToString:@"clearWebsiteDataForDomains"]) {
     [self clearWebsiteDataForDomains:[call arguments] result:result];
+  } else if ([[call method] isEqualToString:@"clearWebsiteDataForSession"]) {
+    [self clearWebsiteDataForSession:[call arguments] result:result];
   } else if ([[call method] isEqualToString:@"clearWebsiteData"]) {
     [self clearWebsiteData:[call arguments] result:result];
   } else {
@@ -131,6 +135,34 @@ static NSArray<WKWebsiteDataStore *> *FLAllWebsiteDataStores(void) {
   }
 }
 
+- (void)getCookiesForSession:(NSDictionary *)options result:(FlutterResult)result {
+  if (@available(iOS 11.0, *)) {
+    if (![options isKindOfClass:[NSDictionary class]]) {
+      result([FlutterError errorWithCode:@"invalid_arguments"
+                                 message:@"Expected a map of session cookie options"
+                                 details:nil]);
+      return;
+    }
+    NSString *sessionKey = [self stringValue:options[@"sessionKey"]];
+    if ([FLCookieManager normalizedSessionKey:sessionKey].length == 0) {
+      result([FlutterError errorWithCode:@"invalid_arguments"
+                                 message:@"Expected a non-empty sessionKey"
+                                 details:nil]);
+      return;
+    }
+    WKWebsiteDataStore *dataStore = [FLCookieManager websiteDataStoreForSessionKey:sessionKey];
+    [dataStore.httpCookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+      NSMutableArray<NSDictionary *> *serialized = [NSMutableArray array];
+      for (NSHTTPCookie *cookie in cookies) {
+        [serialized addObject:[self serializeCookie:cookie]];
+      }
+      result(serialized);
+    }];
+  } else {
+    result(@[]);
+  }
+}
+
 - (void)setCookies:(NSArray *)cookies result:(FlutterResult)result {
   if (@available(iOS 11.0, *)) {
     dispatch_group_t group = dispatch_group_create();
@@ -160,13 +192,58 @@ static NSArray<WKWebsiteDataStore *> *FLAllWebsiteDataStores(void) {
   }
 }
 
+- (void)setCookiesForSession:(NSDictionary *)options result:(FlutterResult)result {
+  if (@available(iOS 11.0, *)) {
+    if (![options isKindOfClass:[NSDictionary class]]) {
+      result([FlutterError errorWithCode:@"invalid_arguments"
+                                 message:@"Expected a map of session cookie options"
+                                 details:nil]);
+      return;
+    }
+    NSString *sessionKey = [self stringValue:options[@"sessionKey"]];
+    if ([FLCookieManager normalizedSessionKey:sessionKey].length == 0) {
+      result([FlutterError errorWithCode:@"invalid_arguments"
+                                 message:@"Expected a non-empty sessionKey"
+                                 details:nil]);
+      return;
+    }
+    NSArray *cookies = options[@"cookies"];
+    if (![cookies isKindOfClass:[NSArray class]]) {
+      result([FlutterError errorWithCode:@"invalid_arguments"
+                                 message:@"Expected a list of cookies"
+                                 details:nil]);
+      return;
+    }
+    WKHTTPCookieStore *cookieStore =
+        [FLCookieManager websiteDataStoreForSessionKey:sessionKey].httpCookieStore;
+    dispatch_group_t group = dispatch_group_create();
+    for (id value in cookies) {
+      if (![value isKindOfClass:[NSDictionary class]]) {
+        continue;
+      }
+      NSHTTPCookie *cookie = [self deserializeCookie:value];
+      if (cookie == nil) {
+        continue;
+      }
+      dispatch_group_enter(group);
+      [cookieStore setCookie:cookie completionHandler:^{
+        dispatch_group_leave(group);
+      }];
+    }
+    dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+      result(nil);
+    });
+  } else {
+    result(nil);
+  }
+}
+
 - (void)clearCookies:(FlutterResult)result {
   if (@available(iOS 9.0, *)) {
     NSSet<NSString *> *websiteDataTypes = [NSSet setWithObject:WKWebsiteDataTypeCookies];
     [self clearWebsiteDataInStores:FLAllWebsiteDataStores()
                          dataTypes:websiteDataTypes
                         completion:^(BOOL hadData) {
-                          [FLCookieManager removeAllSessionWebsiteDataStores];
                           result(@(hadData));
                         }];
   } else {
@@ -332,7 +409,54 @@ static NSArray<WKWebsiteDataStore *> *FLAllWebsiteDataStores(void) {
     }
 
     [self clearWebsiteDataInStores:FLAllWebsiteDataStores() dataTypes:dataTypes completion:^(BOOL hadData) {
-      [FLCookieManager removeAllSessionWebsiteDataStores];
+      result(@(hadData));
+    }];
+  } else {
+    NSLog(@"Clearing website data is not supported for Flutter WebViews prior to iOS 9.");
+    result(@(NO));
+  }
+}
+
+- (void)clearWebsiteDataForSession:(NSDictionary *)options result:(FlutterResult)result {
+  if (@available(iOS 9.0, *)) {
+    if (![options isKindOfClass:[NSDictionary class]]) {
+      result([FlutterError errorWithCode:@"invalid_arguments"
+                                 message:@"Expected a map of website data options"
+                                 details:nil]);
+      return;
+    }
+
+    NSString *sessionKey = [self stringValue:options[@"sessionKey"]];
+    if ([FLCookieManager normalizedSessionKey:sessionKey].length == 0) {
+      result([FlutterError errorWithCode:@"invalid_arguments"
+                                 message:@"Expected a non-empty sessionKey"
+                                 details:nil]);
+      return;
+    }
+    BOOL includeCookies = [self boolValue:options[@"includeCookies"] defaultValue:YES];
+    BOOL includeLocalStorage = [self boolValue:options[@"includeLocalStorage"] defaultValue:YES];
+    BOOL includeCache = [self boolValue:options[@"includeCache"] defaultValue:YES];
+    NSMutableSet<NSString *> *dataTypes = [NSMutableSet set];
+    if (includeCookies) {
+      [dataTypes addObject:WKWebsiteDataTypeCookies];
+    }
+    if (includeLocalStorage) {
+      [dataTypes addObject:WKWebsiteDataTypeLocalStorage];
+      [dataTypes addObject:WKWebsiteDataTypeSessionStorage];
+      [dataTypes addObject:WKWebsiteDataTypeIndexedDBDatabases];
+      [dataTypes addObject:WKWebsiteDataTypeWebSQLDatabases];
+    }
+    if (includeCache) {
+      [dataTypes addObject:WKWebsiteDataTypeDiskCache];
+      [dataTypes addObject:WKWebsiteDataTypeMemoryCache];
+    }
+    if (dataTypes.count == 0) {
+      result(@(NO));
+      return;
+    }
+
+    WKWebsiteDataStore *store = [FLCookieManager websiteDataStoreForSessionKey:sessionKey];
+    [self clearWebsiteDataInStores:@[ store ] dataTypes:dataTypes completion:^(BOOL hadData) {
       result(@(hadData));
     }];
   } else {
@@ -443,6 +567,13 @@ static NSArray<WKWebsiteDataStore *> *FLAllWebsiteDataStores(void) {
     return [value boolValue];
   }
   return defaultValue;
+}
+
+- (NSString *)stringValue:(id)value {
+  if ([value isKindOfClass:[NSString class]]) {
+    return value;
+  }
+  return @"";
 }
 
 - (NSDictionary *)serializeCookie:(NSHTTPCookie *)cookie {

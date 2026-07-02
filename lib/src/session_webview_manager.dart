@@ -10,6 +10,37 @@ import 'package:flutter/widgets.dart';
 import '../platform_interface.dart';
 import '../webview_flutter.dart';
 
+/// Captured web storage for one origin.
+class OriginStorageSnapshot {
+  /// Creates a new [OriginStorageSnapshot].
+  const OriginStorageSnapshot({
+    required this.localStorage,
+    required this.sessionStorage,
+  });
+
+  /// Persisted localStorage key-value pairs.
+  final Map<String, String> localStorage;
+
+  /// Persisted sessionStorage key-value pairs.
+  final Map<String, String> sessionStorage;
+
+  /// Serializes this origin storage snapshot.
+  Map<String, dynamic> toMap() {
+    return <String, dynamic>{
+      'localStorage': localStorage,
+      'sessionStorage': sessionStorage,
+    };
+  }
+
+  /// Deserializes this origin storage snapshot.
+  factory OriginStorageSnapshot.fromMap(Map<dynamic, dynamic> map) {
+    return OriginStorageSnapshot(
+      localStorage: SessionSnapshot._stringMap(map['localStorage']),
+      sessionStorage: SessionSnapshot._stringMap(map['sessionStorage']),
+    );
+  }
+}
+
 /// Captures the current session binding from the active page.
 typedef SessionBindingCapture = Future<String?> Function(
   String sessionKey,
@@ -189,6 +220,7 @@ class SessionSnapshot {
     required this.cookieDomains,
     required this.localStorage,
     required this.sessionStorage,
+    this.storageByOrigin = const <String, OriginStorageSnapshot>{},
     this.lastUrl,
     this.sessionBinding,
     required this.updatedAt,
@@ -209,6 +241,9 @@ class SessionSnapshot {
   /// Persisted sessionStorage key-value pairs.
   final Map<String, String> sessionStorage;
 
+  /// Persisted storage grouped by web origin.
+  final Map<String, OriginStorageSnapshot> storageByOrigin;
+
   /// Last loaded main-frame URL.
   final String? lastUrl;
 
@@ -226,6 +261,10 @@ class SessionSnapshot {
       'cookieDomains': cookieDomains,
       'localStorage': localStorage,
       'sessionStorage': sessionStorage,
+      'storageByOrigin': storageByOrigin.map<String, Map<String, dynamic>>(
+        (String origin, OriginStorageSnapshot value) =>
+            MapEntry<String, Map<String, dynamic>>(origin, value.toMap()),
+      ),
       'lastUrl': lastUrl,
       'sessionBinding': sessionBinding,
       'updatedAt': updatedAt.millisecondsSinceEpoch,
@@ -245,6 +284,7 @@ class SessionSnapshot {
           .toList(),
       localStorage: _stringMap(map['localStorage']),
       sessionStorage: _stringMap(map['sessionStorage']),
+      storageByOrigin: _storageByOriginMap(map['storageByOrigin']),
       lastUrl: map['lastUrl'] as String?,
       sessionBinding: map['sessionBinding'] as String?,
       updatedAt: DateTime.fromMillisecondsSinceEpoch(
@@ -260,6 +300,31 @@ class SessionSnapshot {
     return value.map<String, String>((dynamic key, dynamic val) {
       return MapEntry<String, String>(key.toString(), val?.toString() ?? '');
     });
+  }
+
+  static Map<String, OriginStorageSnapshot> _storageByOriginMap(
+    dynamic value,
+  ) {
+    if (value is! Map) {
+      return <String, OriginStorageSnapshot>{};
+    }
+    return value.map<String, OriginStorageSnapshot>(
+      (dynamic key, dynamic val) {
+        if (val is Map) {
+          return MapEntry<String, OriginStorageSnapshot>(
+            key.toString(),
+            OriginStorageSnapshot.fromMap(val),
+          );
+        }
+        return MapEntry<String, OriginStorageSnapshot>(
+          key.toString(),
+          const OriginStorageSnapshot(
+            localStorage: <String, String>{},
+            sessionStorage: <String, String>{},
+          ),
+        );
+      },
+    );
   }
 }
 
@@ -282,6 +347,7 @@ class _SessionRestoreState {
   bool storageRestored = false;
   bool reloadedAfterRestore = false;
   bool validationRetried = false;
+  final Set<String> restoredOrigins = <String>{};
 }
 
 class _SessionWebViewEntry {
@@ -295,8 +361,10 @@ class _SessionWebViewEntry {
   WebViewController? controller;
   Key widgetKey = UniqueKey();
   String? lastUrl;
+  String? lastOrigin;
   SessionSnapshot? snapshot;
   final LinkedHashSet<String> cookieDomains = LinkedHashSet<String>();
+  final LinkedHashSet<String> origins = LinkedHashSet<String>();
   bool resident = false;
   _SessionRestoreState? restoreState;
 }
@@ -575,11 +643,13 @@ class SessionWebViewManager extends ChangeNotifier {
       onPageStarted: (String url) {
         entry.lastUrl = url;
         _recordCookieDomain(entry, url);
+        _recordOrigin(entry, url);
         onPageStarted?.call(url);
       },
       onPageFinished: (String url) {
         entry.lastUrl = url;
         _recordCookieDomain(entry, url);
+        _recordOrigin(entry, url);
         onPageFinished?.call(url);
         _ignore(_onPageFinished(entry));
       },
@@ -623,6 +693,9 @@ class SessionWebViewManager extends ChangeNotifier {
         entry.cookieDomains
           ..clear()
           ..addAll(entry.snapshot!.cookieDomains);
+        entry.origins
+          ..clear()
+          ..addAll(entry.snapshot!.storageByOrigin.keys);
       }
     }
     if (entry.resident && entry.controller != null) {
@@ -685,27 +758,6 @@ class SessionWebViewManager extends ChangeNotifier {
       return entry?.snapshot ?? await sessionStore.read(sessionKey);
     }
 
-    if (Platform.isIOS) {
-      final String? currentUrl = await _capturePart<String?>(
-        sessionKey: sessionKey,
-        label: 'currentUrl',
-        fallback: null,
-        action: controller.currentUrl,
-      );
-      final SessionSnapshot snapshot = SessionSnapshot(
-        sessionKey: sessionKey,
-        cookies: <WebViewCookie>[],
-        cookieDomains: <String>[],
-        localStorage: <String, String>{},
-        sessionStorage: <String, String>{},
-        lastUrl: currentUrl ?? entry.lastUrl ?? entry.initialUrl,
-        updatedAt: DateTime.now(),
-      );
-      entry.snapshot = snapshot;
-      await sessionStore.write(snapshot);
-      return snapshot;
-    }
-
     final SessionSnapshot? previousSnapshot =
         entry.snapshot ?? await sessionStore.read(sessionKey);
     final List<String> cookieDomains = _cookieDomainsForEntry(entry);
@@ -713,7 +765,9 @@ class SessionWebViewManager extends ChangeNotifier {
       sessionKey: sessionKey,
       label: 'cookies',
       fallback: previousSnapshot?.cookies ?? <WebViewCookie>[],
-      action: () => _cookieManager.getCookiesForDomains(cookieDomains),
+      action: () => Platform.isIOS
+          ? _cookieManager.getCookiesForSession(sessionKey)
+          : _cookieManager.getCookiesForDomains(cookieDomains),
     );
     final Map<String, String> localStorage =
         await _capturePart<Map<String, String>>(
@@ -735,6 +789,31 @@ class SessionWebViewManager extends ChangeNotifier {
       fallback: null,
       action: controller.currentUrl,
     );
+    final String? currentOrigin =
+        _originForUrl(currentUrl ?? entry.lastUrl ?? entry.initialUrl);
+    final Map<String, OriginStorageSnapshot> storageByOrigin =
+        <String, OriginStorageSnapshot>{
+      if (previousSnapshot != null) ...previousSnapshot.storageByOrigin,
+    };
+    if (storageByOrigin.isEmpty &&
+        previousSnapshot != null &&
+        (previousSnapshot.localStorage.isNotEmpty ||
+            previousSnapshot.sessionStorage.isNotEmpty)) {
+      final String? previousOrigin = _originForUrl(previousSnapshot.lastUrl);
+      if (previousOrigin != null) {
+        storageByOrigin[previousOrigin] = OriginStorageSnapshot(
+          localStorage: previousSnapshot.localStorage,
+          sessionStorage: previousSnapshot.sessionStorage,
+        );
+      }
+    }
+    if (currentOrigin != null) {
+      storageByOrigin[currentOrigin] = OriginStorageSnapshot(
+        localStorage: localStorage,
+        sessionStorage: sessionStorage,
+      );
+      entry.origins.add(currentOrigin);
+    }
     final String? binding = sessionBindingCapture == null
         ? previousSnapshot?.sessionBinding
         : await _capturePart<String?>(
@@ -750,6 +829,7 @@ class SessionWebViewManager extends ChangeNotifier {
       cookieDomains: cookieDomains,
       localStorage: localStorage,
       sessionStorage: sessionStorage,
+      storageByOrigin: storageByOrigin,
       lastUrl: currentUrl ??
           entry.lastUrl ??
           previousSnapshot?.lastUrl ??
@@ -762,7 +842,8 @@ class SessionWebViewManager extends ChangeNotifier {
     debugPrint(
       '[SessionWebViewManager] captured sessionKey=$sessionKey '
       'cookies=${cookies.length} local=${localStorage.length} '
-      'session=${sessionStorage.length} lastUrl=${snapshot.lastUrl}',
+      'session=${sessionStorage.length} origins=${storageByOrigin.length} '
+      'lastUrl=${snapshot.lastUrl}',
     );
     return snapshot;
   }
@@ -792,14 +873,6 @@ class SessionWebViewManager extends ChangeNotifier {
       if (controller == null) {
         return;
       }
-      if (Platform.isIOS) {
-        final String targetUrl =
-            entry.restoreState?.targetUrl ?? entry.initialUrl;
-        debugPrint(
-            '[SessionWebViewManager] iOS (nonPersistent): loading targetUrl=$targetUrl directly');
-        await controller.loadUrl(targetUrl);
-        return;
-      }
       final _SessionRestoreState? restoreState = entry.restoreState;
       debugPrint(
           '[SessionWebViewManager] _restoreIfNeeded called for sessionKey=${entry.sessionKey} restoreState=${restoreState != null}');
@@ -821,7 +894,14 @@ class SessionWebViewManager extends ChangeNotifier {
         if (restoreState.restoreCookies) {
           // Cookies are restored before the initial navigation so server-side auth
           // can see the recovered session on the first request.
-          await _cookieManager.setCookies(restoreState.snapshot.cookies);
+          if (Platform.isIOS) {
+            await _cookieManager.setCookiesForSession(
+              entry.sessionKey,
+              restoreState.snapshot.cookies,
+            );
+          } else {
+            await _cookieManager.setCookies(restoreState.snapshot.cookies);
+          }
         }
         _sharedSessionStateKey = entry.sessionKey;
         debugPrint(
@@ -867,13 +947,6 @@ class SessionWebViewManager extends ChangeNotifier {
     if (controller == null) {
       return;
     }
-    if (Platform.isIOS) {
-      if (restoreState != null) {
-        entry.restoreState = null;
-      }
-      await _captureSnapshot(entry.sessionKey);
-      return;
-    }
     if (restoreState == null) {
       debugPrint(
           '[SessionWebViewManager] _onPageFinished: no restoreState, capturing snapshot');
@@ -882,17 +955,21 @@ class SessionWebViewManager extends ChangeNotifier {
     }
     debugPrint(
         '[SessionWebViewManager] _onPageFinished: storageRestored=${restoreState.storageRestored}');
-    if (!restoreState.storageRestored) {
+    final String? currentOrigin = _originForUrl(entry.lastUrl);
+    final OriginStorageSnapshot? originStorage =
+        _storageForOrigin(restoreState.snapshot, currentOrigin);
+    if (currentOrigin != null &&
+        !restoreState.restoredOrigins.contains(currentOrigin)) {
       final bool shouldRestoreStorage = restoreState.restoreLocalStorage ||
           restoreState.restoreSessionStorage;
       debugPrint(
-          '[SessionWebViewManager] _onPageFinished: shouldRestoreStorage=$shouldRestoreStorage');
+          '[SessionWebViewManager] _onPageFinished: shouldRestoreStorage=$shouldRestoreStorage origin=$currentOrigin');
       if (restoreState.restoreLocalStorage) {
         debugPrint(
             '[SessionWebViewManager] _onPageFinished: restoring localStorage');
         try {
           await controller.restoreLocalStorage(
-            restoreState.snapshot.localStorage,
+            originStorage?.localStorage ?? <String, String>{},
           );
         } catch (e) {
           debugPrint('[SessionWebViewManager] restoreLocalStorage failed: $e');
@@ -903,19 +980,23 @@ class SessionWebViewManager extends ChangeNotifier {
             '[SessionWebViewManager] _onPageFinished: restoring sessionStorage');
         try {
           await controller.restoreSessionStorage(
-            restoreState.snapshot.sessionStorage,
+            originStorage?.sessionStorage ?? <String, String>{},
           );
         } catch (e) {
           debugPrint(
               '[SessionWebViewManager] restoreSessionStorage failed: $e');
         }
       }
+      restoreState.restoredOrigins.add(currentOrigin);
       restoreState.storageRestored = true;
-      if (shouldRestoreStorage && !restoreState.reloadedAfterRestore) {
+      final bool restoredAnyStorage =
+          (originStorage?.localStorage.isNotEmpty ?? false) ||
+              (originStorage?.sessionStorage.isNotEmpty ?? false);
+      if (shouldRestoreStorage &&
+          restoredAnyStorage &&
+          !restoreState.reloadedAfterRestore) {
         restoreState.reloadedAfterRestore = true;
-        debugPrint(
-            '[SessionWebViewManager] _onPageFinished: reloading page after delay');
-        await Future<void>.delayed(const Duration(milliseconds: 150));
+        debugPrint('[SessionWebViewManager] _onPageFinished: reloading page');
         await controller.loadUrl(restoreState.targetUrl);
         debugPrint('[SessionWebViewManager] _onPageFinished: reload triggered');
         return;
@@ -929,18 +1010,28 @@ class SessionWebViewManager extends ChangeNotifier {
         restoreState.validationRetried = true;
         // Retry exactly once with a full cookie/storage rewrite to recover from
         // pages that read state too early during bootstrap.
-        await _cookieManager.setCookies(restoreState.snapshot.cookies);
+        if (Platform.isIOS) {
+          await _cookieManager.setCookiesForSession(
+            entry.sessionKey,
+            restoreState.snapshot.cookies,
+          );
+        } else {
+          await _cookieManager.setCookies(restoreState.snapshot.cookies);
+        }
+        final OriginStorageSnapshot retryStorage =
+            _storageForOrigin(restoreState.snapshot, currentOrigin) ??
+                OriginStorageSnapshot(
+                  localStorage: restoreState.snapshot.localStorage,
+                  sessionStorage: restoreState.snapshot.sessionStorage,
+                );
         try {
-          await controller
-              .restoreLocalStorage(restoreState.snapshot.localStorage);
+          await controller.restoreLocalStorage(retryStorage.localStorage);
         } catch (e) {
           debugPrint(
               '[SessionWebViewManager] retry restoreLocalStorage failed: $e');
         }
         try {
-          await controller.restoreSessionStorage(
-            restoreState.snapshot.sessionStorage,
-          );
+          await controller.restoreSessionStorage(retryStorage.sessionStorage);
         } catch (e) {
           debugPrint(
               '[SessionWebViewManager] retry restoreSessionStorage failed: $e');
@@ -961,6 +1052,7 @@ class SessionWebViewManager extends ChangeNotifier {
           _SessionWebViewEntry(sessionKey: sessionKey, initialUrl: initialUrl),
     );
     _recordCookieDomain(entry, initialUrl);
+    _recordOrigin(entry, initialUrl);
     return entry;
   }
 
@@ -974,7 +1066,19 @@ class SessionWebViewManager extends ChangeNotifier {
     WebViewController controller,
   ) async {
     final List<String> domains = _cookieDomainsForEntry(entry);
-    if (domains.isNotEmpty) {
+    if (Platform.isIOS) {
+      try {
+        await _cookieManager.clearWebsiteDataForSession(
+          entry.sessionKey,
+          includeCookies: true,
+          includeLocalStorage: true,
+          includeCache: false,
+        );
+      } catch (e) {
+        debugPrint(
+            '[SessionWebViewManager] clearWebsiteDataForSession failed: $e');
+      }
+    } else if (domains.isNotEmpty) {
       try {
         await _cookieManager.clearWebsiteDataForDomains(
           domains,
@@ -1027,6 +1131,51 @@ class SessionWebViewManager extends ChangeNotifier {
     if (host.isNotEmpty) {
       entry.cookieDomains.add(host);
     }
+  }
+
+  void _recordOrigin(_SessionWebViewEntry entry, String? url) {
+    final String? origin = _originForUrl(url);
+    if (origin == null) {
+      return;
+    }
+    entry.origins.add(origin);
+    entry.lastOrigin = origin;
+  }
+
+  OriginStorageSnapshot? _storageForOrigin(
+    SessionSnapshot snapshot,
+    String? origin,
+  ) {
+    if (origin != null && snapshot.storageByOrigin.containsKey(origin)) {
+      return snapshot.storageByOrigin[origin];
+    }
+    if (snapshot.localStorage.isNotEmpty ||
+        snapshot.sessionStorage.isNotEmpty) {
+      final String? snapshotOrigin = _originForUrl(snapshot.lastUrl);
+      if (origin == null || snapshotOrigin == origin) {
+        return OriginStorageSnapshot(
+          localStorage: snapshot.localStorage,
+          sessionStorage: snapshot.sessionStorage,
+        );
+      }
+    }
+    return null;
+  }
+
+  String? _originForUrl(String? url) {
+    if (url == null || url.isEmpty) {
+      return null;
+    }
+    final Uri? uri = Uri.tryParse(url);
+    if (uri == null ||
+        uri.host.isEmpty ||
+        (uri.scheme != 'http' && uri.scheme != 'https')) {
+      return null;
+    }
+    final bool hasDefaultPort = (uri.scheme == 'http' && uri.port == 80) ||
+        (uri.scheme == 'https' && uri.port == 443);
+    final String port = uri.hasPort && !hasDefaultPort ? ':${uri.port}' : '';
+    return '${uri.scheme}://${uri.host}$port';
   }
 
   Future<T> _enqueue<T>(Future<T> Function() action) {

@@ -189,11 +189,42 @@ class MethodChannelWebViewPlatform implements WebViewPlatformController {
         .toList();
   }
 
+  /// Method channel implementation for [WebViewPlatform.getCookiesForSession].
+  static Future<List<WebViewCookie>> getCookiesForSession(
+      String sessionKey) async {
+    final List<dynamic>? result = await _cookieManagerChannel
+        .invokeMethod<List<dynamic>>('getCookiesForSession', <String, dynamic>{
+      'sessionKey': sessionKey,
+    });
+    if (result == null) {
+      return <WebViewCookie>[];
+    }
+    return result
+        .map((dynamic item) =>
+            WebViewCookie.fromMap(item as Map<dynamic, dynamic>))
+        .toList();
+  }
+
   /// Method channel implementation for [WebViewPlatform.setCookies].
   static Future<void> setCookies(List<WebViewCookie> cookies) {
     return _cookieManagerChannel.invokeMethod<void>(
       'setCookies',
       cookies.map((WebViewCookie cookie) => cookie.toMap()).toList(),
+    );
+  }
+
+  /// Method channel implementation for [WebViewPlatform.setCookiesForSession].
+  static Future<void> setCookiesForSession(
+    String sessionKey,
+    List<WebViewCookie> cookies,
+  ) {
+    return _cookieManagerChannel.invokeMethod<void>(
+      'setCookiesForSession',
+      <String, dynamic>{
+        'sessionKey': sessionKey,
+        'cookies':
+            cookies.map((WebViewCookie cookie) => cookie.toMap()).toList(),
+      },
     );
   }
 
@@ -207,6 +238,22 @@ class MethodChannelWebViewPlatform implements WebViewPlatformController {
     return _cookieManagerChannel
         .invokeMethod<bool>('clearWebsiteDataForDomains', <String, dynamic>{
       'domains': domains,
+      'includeCookies': includeCookies,
+      'includeLocalStorage': includeLocalStorage,
+      'includeCache': includeCache,
+    }).then<bool>((dynamic result) => result!);
+  }
+
+  /// Method channel implementation for [WebViewPlatform.clearWebsiteDataForSession].
+  static Future<bool> clearWebsiteDataForSession(
+    String sessionKey, {
+    bool includeCookies = true,
+    bool includeLocalStorage = true,
+    bool includeCache = true,
+  }) {
+    return _cookieManagerChannel
+        .invokeMethod<bool>('clearWebsiteDataForSession', <String, dynamic>{
+      'sessionKey': sessionKey,
       'includeCookies': includeCookies,
       'includeLocalStorage': includeLocalStorage,
       'includeCache': includeCache,

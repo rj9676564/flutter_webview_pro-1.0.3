@@ -54,8 +54,19 @@ class CupertinoWebView implements WebViewPlatform {
       MethodChannelWebViewPlatform.getCookiesForDomains(domains);
 
   @override
+  Future<List<WebViewCookie>> getCookiesForSession(String sessionKey) =>
+      MethodChannelWebViewPlatform.getCookiesForSession(sessionKey);
+
+  @override
   Future<void> setCookies(List<WebViewCookie> cookies) =>
       MethodChannelWebViewPlatform.setCookies(cookies);
+
+  @override
+  Future<void> setCookiesForSession(
+    String sessionKey,
+    List<WebViewCookie> cookies,
+  ) =>
+      MethodChannelWebViewPlatform.setCookiesForSession(sessionKey, cookies);
 
   @override
   Future<bool> clearWebsiteDataForDomains(
@@ -66,6 +77,20 @@ class CupertinoWebView implements WebViewPlatform {
   }) =>
       MethodChannelWebViewPlatform.clearWebsiteDataForDomains(
         domains,
+        includeCookies: includeCookies,
+        includeLocalStorage: includeLocalStorage,
+        includeCache: includeCache,
+      );
+
+  @override
+  Future<bool> clearWebsiteDataForSession(
+    String sessionKey, {
+    bool includeCookies = true,
+    bool includeLocalStorage = true,
+    bool includeCache = true,
+  }) =>
+      MethodChannelWebViewPlatform.clearWebsiteDataForSession(
+        sessionKey,
         includeCookies: includeCookies,
         includeLocalStorage: includeLocalStorage,
         includeCache: includeCache,

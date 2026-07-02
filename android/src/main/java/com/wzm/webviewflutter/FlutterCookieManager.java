@@ -8,6 +8,7 @@ import android.content.Context;
 import android.os.Build;
 import android.os.Build.VERSION_CODES;
 import android.webkit.CookieManager;
+import android.webkit.CookieSyncManager;
 import android.webkit.ValueCallback;
 import android.webkit.WebStorage;
 import android.webkit.WebView;
@@ -32,10 +33,23 @@ class FlutterCookieManager implements MethodCallHandler {
   private final MethodChannel methodChannel;
   private final Context context;
 
+  private static class CookieWrite {
+    final String url;
+    final String header;
+
+    CookieWrite(String url, String header) {
+      this.url = url;
+      this.header = header;
+    }
+  }
+
   FlutterCookieManager(BinaryMessenger messenger, Context context) {
     methodChannel = new MethodChannel(messenger, "plugins.flutter.io/cookie_manager");
     methodChannel.setMethodCallHandler(this);
     this.context = context;
+    if (Build.VERSION.SDK_INT < VERSION_CODES.LOLLIPOP && context != null) {
+      CookieSyncManager.createInstance(context);
+    }
   }
 
   @Override
@@ -50,11 +64,20 @@ class FlutterCookieManager implements MethodCallHandler {
       case "getCookiesForDomains":
         getCookiesForDomains(methodCall.arguments, result);
         break;
+      case "getCookiesForSession":
+        getCookiesForSession(methodCall.arguments, result);
+        break;
       case "setCookies":
         setCookies(methodCall.arguments, result);
         break;
+      case "setCookiesForSession":
+        setCookiesForSession(methodCall.arguments, result);
+        break;
       case "clearWebsiteDataForDomains":
         clearWebsiteDataForDomains(methodCall.arguments, result);
+        break;
+      case "clearWebsiteDataForSession":
+        clearWebsiteDataForSession(methodCall.arguments, result);
         break;
       case "clearWebsiteData":
         clearWebsiteData(methodCall.arguments, result);
@@ -198,6 +221,13 @@ class FlutterCookieManager implements MethodCallHandler {
     result.success(cookies);
   }
 
+  private static void getCookiesForSession(final Object arguments, final Result result) {
+    result.error(
+        "unsupported_operation",
+        "Android WebView exposes one process-wide CookieManager; per-session cookies are not supported.",
+        null);
+  }
+
   private static void setCookies(final Object arguments, final Result result) {
     if (!(arguments instanceof List)) {
       result.error("invalid_arguments", "Expected a list of cookies", null);
@@ -205,7 +235,26 @@ class FlutterCookieManager implements MethodCallHandler {
     }
 
     CookieManager cookieManager = CookieManager.getInstance();
-    final List<?> cookieList = (List<?>) arguments;
+    final List<CookieWrite> writes = cookieWritesFromList((List<?>) arguments);
+    writeCookies(cookieManager, writes, result);
+  }
+
+  private static void setCookiesForSession(final Object arguments, final Result result) {
+    result.error(
+        "unsupported_operation",
+        "Android WebView exposes one process-wide CookieManager; per-session cookies are not supported.",
+        null);
+  }
+
+  private void clearWebsiteDataForSession(final Object arguments, final Result result) {
+    result.error(
+        "unsupported_operation",
+        "Android WebView data is process-global in this plugin; per-session clearing is not supported.",
+        null);
+  }
+
+  private static List<CookieWrite> cookieWritesFromList(final List<?> cookieList) {
+    final List<CookieWrite> writes = new ArrayList<>();
     for (Object cookieValue : cookieList) {
       if (!(cookieValue instanceof Map)) {
         continue;
@@ -223,10 +272,46 @@ class FlutterCookieManager implements MethodCallHandler {
       }
       String scheme = Boolean.TRUE.equals(cookie.get("isSecure")) ? "https" : "http";
       String url = scheme + "://" + host + "/";
-      cookieManager.setCookie(url, buildCookieHeader(cookie, host));
+      writes.add(new CookieWrite(url, buildCookieHeader(cookie, host)));
     }
-    flushCookies(cookieManager);
-    result.success(null);
+    return writes;
+  }
+
+  private static void writeCookies(
+      final CookieManager cookieManager,
+      final List<CookieWrite> writes,
+      final Result result) {
+    if (writes.isEmpty()) {
+      flushCookies(cookieManager);
+      result.success(null);
+      return;
+    }
+    if (Build.VERSION.SDK_INT < VERSION_CODES.LOLLIPOP) {
+      for (CookieWrite write : writes) {
+        cookieManager.setCookie(write.url, write.header);
+      }
+      flushCookies(cookieManager);
+      result.success(null);
+      return;
+    }
+
+    final int[] pending = new int[] {writes.size()};
+    final boolean[] completed = new boolean[] {false};
+    final ValueCallback<Boolean> callback =
+        new ValueCallback<Boolean>() {
+          @Override
+          public void onReceiveValue(Boolean value) {
+            pending[0] -= 1;
+            if (pending[0] == 0 && !completed[0]) {
+              completed[0] = true;
+              flushCookies(cookieManager);
+              result.success(null);
+            }
+          }
+        };
+    for (CookieWrite write : writes) {
+      cookieManager.setCookie(write.url, write.header, callback);
+    }
   }
 
   private boolean clearWebsiteDataForHosts(
@@ -360,6 +445,12 @@ class FlutterCookieManager implements MethodCallHandler {
   private static void flushCookies(CookieManager cookieManager) {
     if (Build.VERSION.SDK_INT >= VERSION_CODES.LOLLIPOP) {
       cookieManager.flush();
+    } else {
+      try {
+        CookieSyncManager.getInstance().sync();
+      } catch (IllegalStateException ignored) {
+        // CookieSyncManager requires createInstance(context) before getInstance().
+      }
     }
   }
 

@@ -904,9 +904,20 @@ class CookieManager {
   Future<List<WebViewCookie>> getCookiesForDomains(List<String> domains) =>
       WebView.platform.getCookiesForDomains(domains);
 
+  /// Returns cookies for the specified isolated WebView session.
+  Future<List<WebViewCookie>> getCookiesForSession(String sessionKey) =>
+      WebView.platform.getCookiesForSession(sessionKey);
+
   /// Restores cookies into the current shared cookie store.
   Future<void> setCookies(List<WebViewCookie> cookies) =>
       WebView.platform.setCookies(cookies);
+
+  /// Restores cookies into the specified isolated WebView session.
+  Future<void> setCookiesForSession(
+    String sessionKey,
+    List<WebViewCookie> cookies,
+  ) =>
+      WebView.platform.setCookiesForSession(sessionKey, cookies);
 
   /// Clears cookies, local storage, and cache data for the specified domains.
   ///
@@ -922,6 +933,20 @@ class CookieManager {
   }) =>
       WebView.platform.clearWebsiteDataForDomains(
         domains,
+        includeCookies: includeCookies,
+        includeLocalStorage: includeLocalStorage,
+        includeCache: includeCache,
+      );
+
+  /// Clears cookies, local storage, and cache data for the specified session.
+  Future<bool> clearWebsiteDataForSession(
+    String sessionKey, {
+    bool includeCookies = true,
+    bool includeLocalStorage = true,
+    bool includeCache = true,
+  }) =>
+      WebView.platform.clearWebsiteDataForSession(
+        sessionKey,
         includeCookies: includeCookies,
         includeLocalStorage: includeLocalStorage,
         includeCache: includeCache,

@@ -199,14 +199,20 @@ class FlutterWebViewClient {
               }
           }
 
-          // 3. 普通 http/https 链接：加上 Referer（您原来的支付发起页需要）
+          // 3. 微信 H5 支付链接：加上 Referer（解决“商家参数格式有误”）
+          //
+          // 不要拦截所有 http/https 导航。登录/授权流程里的 302、表单跳转、
+          // OAuth 回跳如果被这里重新 loadUrl，会丢失原导航上下文，导致页面
+          // 已登录但后续获取授权门店失败。
           if (url.startsWith("http://") || url.startsWith("https://")) {
-              HashMap<String, String> headers = new HashMap<>();
-              if (!TextUtils.isEmpty(mReffer)) {
-                  headers.put("Referer", mReffer);  // 关键，解决“商家参数格式有误”
+              if (shouldLoadWithPaymentReferer(url)) {
+                  HashMap<String, String> headers = new HashMap<>();
+                  if (!TextUtils.isEmpty(mReffer)) {
+                      headers.put("Referer", mReffer);  // 关键，解决“商家参数格式有误”
+                  }
+                  view.loadUrl(url, headers);
+                  return true;
               }
-              view.loadUrl(url, headers);
-              return true;
           }
 
           // 4. 其他所有情况（包括您之前的特殊处理）：交给父类或 Flutter 插件处理
@@ -252,8 +258,6 @@ class FlutterWebViewClient {
       @Nullable
       @Override
       public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
-        ///获取请求uir
-        String url = request.getUrl().toString();
         ///获取RequestHeader中的所有 key value
         Map<String, String> lRequestHeaders = request.getRequestHeaders();
 
@@ -261,14 +265,29 @@ class FlutterWebViewClient {
           mReffer = lRequestHeaders.get("Referer");
         }
 
-        Log.e("测试URI",mReffer);
-        Log.e("测试URI",url);
         return super.shouldInterceptRequest(view, request);
       }
     };
   }
 
   String mReffer = "";
+
+  private boolean shouldLoadWithPaymentReferer(String url) {
+    try {
+      Uri uri = Uri.parse(url);
+      String host = uri.getHost();
+      if (host == null) {
+        return false;
+      }
+      host = host.toLowerCase(Locale.US);
+      if (!host.equals("wx.tenpay.com") && !host.endsWith(".wx.tenpay.com")) {
+        return false;
+      }
+      return "/cgi-bin/mmpayweb-bin/checkmweb".equals(uri.getPath());
+    } catch (Exception e) {
+      return false;
+    }
+  }
 
   private WebViewClientCompat internalCreateWebViewClientCompat() {
     return new WebViewClientCompat() {

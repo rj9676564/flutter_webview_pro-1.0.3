@@ -632,10 +632,25 @@ abstract class WebViewPlatform {
         "WebView getCookiesForDomains is not implemented on the current platform");
   }
 
+  /// Returns cookies for the specified isolated WebView session.
+  Future<List<WebViewCookie>> getCookiesForSession(String sessionKey) {
+    throw UnimplementedError(
+        "WebView getCookiesForSession is not implemented on the current platform");
+  }
+
   /// Restores cookies into the current platform cookie store.
   Future<void> setCookies(List<WebViewCookie> cookies) {
     throw UnimplementedError(
         "WebView setCookies is not implemented on the current platform");
+  }
+
+  /// Restores cookies into the specified isolated WebView session.
+  Future<void> setCookiesForSession(
+    String sessionKey,
+    List<WebViewCookie> cookies,
+  ) {
+    throw UnimplementedError(
+        "WebView setCookiesForSession is not implemented on the current platform");
   }
 
   /// Clears cookies, local storage, and cache data for the specified domains.
@@ -654,6 +669,17 @@ abstract class WebViewPlatform {
   }) {
     throw UnimplementedError(
         "WebView clearWebsiteDataForDomains is not implemented on the current platform");
+  }
+
+  /// Clears WebView data for the specified isolated WebView session.
+  Future<bool> clearWebsiteDataForSession(
+    String sessionKey, {
+    bool includeCookies = true,
+    bool includeLocalStorage = true,
+    bool includeCache = true,
+  }) {
+    throw UnimplementedError(
+        "WebView clearWebsiteDataForSession is not implemented on the current platform");
   }
 
   /// Clears global WebView cookies, storage, and cache data.

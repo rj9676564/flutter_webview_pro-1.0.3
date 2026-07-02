@@ -96,7 +96,9 @@
     _sessionKey = sessionKey;
 
     WKWebViewConfiguration* configuration = [[WKWebViewConfiguration alloc] init];
-    _websiteDataStore = [FLCookieManager websiteDataStoreForSessionKey:sessionKey];
+    _websiteDataStore = sessionKey.length > 0
+        ? [FLCookieManager websiteDataStoreForSessionKey:sessionKey]
+        : [WKWebsiteDataStore defaultDataStore];
     configuration.websiteDataStore = _websiteDataStore;
     [self applyConfigurationSettings:settings toConfiguration:configuration];
     configuration.userContentController = userContentController;
@@ -296,15 +298,17 @@
 
 - (void)clearCache:(FlutterResult)result {
   if (@available(iOS 9.0, *)) {
-    [self clearWebViewCache];
-    [self clearCookies]; 
+    [self clearWebViewCache:^{
+      result(nil);
+    }];
   } else {
     // support for iOS8 tracked in https://github.com/flutter/flutter/issues/27624.
     NSLog(@"Clearing cache is not supported for Flutter WebViews prior to iOS 9.");
+    result(nil);
   }
 }
 
-- (void)clearWebViewCache {
+- (void)clearWebViewCache:(void (^)(void))completion {
     NSSet* cacheDataTypes = [WKWebsiteDataStore allWebsiteDataTypes];
     WKWebsiteDataStore* dataStore = _websiteDataStore ?: _webView.configuration.websiteDataStore;
     NSDate* dateFrom = [NSDate dateWithTimeIntervalSince1970:0];
@@ -312,8 +316,9 @@
     [dataStore removeDataOfTypes:cacheDataTypes
                    modifiedSince:dateFrom
                completionHandler:^{
-                   NSLog(@"All website data removed.");
-                   [self clearCookies];
+                   if (completion != nil) {
+                     completion();
+                   }
                }];
 }
 

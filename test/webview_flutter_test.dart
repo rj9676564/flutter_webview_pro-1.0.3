@@ -435,6 +435,77 @@ void main() {
     expect(hasCookies, true);
   });
 
+  testWidgets('Cookies can be stored per session', (WidgetTester tester) async {
+    final WebViewPlatform previousPlatform = WebView.platform;
+    WebView.platform = _SessionCookiePlatform(_fakeCookieManager);
+    final CookieManager cookieManager = CookieManager();
+
+    try {
+      await cookieManager.setCookiesForSession(
+        'user:1|shop:a',
+        const <WebViewCookie>[
+          WebViewCookie(
+            name: 'sid',
+            value: 'A',
+            domain: 'merchant.example.com',
+          ),
+        ],
+      );
+      await cookieManager.setCookiesForSession(
+        'user:1|shop:b',
+        const <WebViewCookie>[
+          WebViewCookie(
+            name: 'sid',
+            value: 'B',
+            domain: 'merchant.example.com',
+          ),
+        ],
+      );
+
+      expect(
+        (await cookieManager.getCookiesForSession('user:1|shop:a'))
+            .single
+            .value,
+        'A',
+      );
+      expect(
+        (await cookieManager.getCookiesForSession('user:1|shop:b'))
+            .single
+            .value,
+        'B',
+      );
+    } finally {
+      WebView.platform = previousPlatform;
+    }
+  });
+
+  testWidgets('Android rejects per-session cookie APIs',
+      (WidgetTester tester) async {
+    final WebViewPlatform previousPlatform = WebView.platform;
+    WebView.platform = SurfaceAndroidWebView();
+    final CookieManager cookieManager = CookieManager();
+
+    try {
+      expect(
+        () => cookieManager.getCookiesForSession('user:1|shop:a'),
+        throwsUnsupportedError,
+      );
+      expect(
+        () => cookieManager.setCookiesForSession(
+          'user:1|shop:a',
+          const <WebViewCookie>[],
+        ),
+        throwsUnsupportedError,
+      );
+      expect(
+        () => cookieManager.clearWebsiteDataForSession('user:1|shop:a'),
+        throwsUnsupportedError,
+      );
+    } finally {
+      WebView.platform = previousPlatform;
+    }
+  });
+
   testWidgets('SessionWebViewManager reuses resident instances',
       (WidgetTester tester) async {
     final SessionWebViewManager manager = SessionWebViewManager();
@@ -554,7 +625,10 @@ void main() {
 
   testWidgets('SessionWebViewManager learns cookie domains from navigation',
       (WidgetTester tester) async {
-    final SessionWebViewManager manager = SessionWebViewManager(capacity: 2);
+    final SessionWebViewManager manager = SessionWebViewManager(
+      capacity: 2,
+      restoreLastUrlOnReopen: true,
+    );
 
     await manager.switchToSession(
       'tenant-a',
@@ -1043,6 +1117,12 @@ void main() {
         cookieDomains: const <String>['merchant.example.com'],
         localStorage: const <String, String>{'token': 'A-TOKEN'},
         sessionStorage: const <String, String>{'tenant': 'tenant-a'},
+        storageByOrigin: const <String, OriginStorageSnapshot>{
+          'https://merchant.example.com': OriginStorageSnapshot(
+            localStorage: <String, String>{'token': 'A-TOKEN'},
+            sessionStorage: <String, String>{'tenant': 'tenant-a'},
+          ),
+        },
         lastUrl: 'https://merchant.example.com',
         updatedAt: DateTime.fromMillisecondsSinceEpoch(1),
       ),
@@ -1055,10 +1135,63 @@ void main() {
     expect(restored!.cookies.single.value, 'cookie-a');
     expect(restored.localStorage['token'], 'A-TOKEN');
     expect(restored.sessionStorage['tenant'], 'tenant-a');
+    expect(
+      restored.storageByOrigin['https://merchant.example.com']!
+          .localStorage['token'],
+      'A-TOKEN',
+    );
 
     if (await file.exists()) {
       await file.delete();
     }
+  });
+
+  testWidgets('SessionWebViewManager captures storage for multiple origins',
+      (WidgetTester tester) async {
+    final SessionWebViewManager manager = SessionWebViewManager(capacity: 2);
+
+    await manager.switchToSession(
+      'tenant-a',
+      initialUrl: 'https://h5.example.com/home',
+    );
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SessionWebViewSwitcher(
+          manager: manager,
+          javascriptMode: JavascriptMode.unrestricted,
+          navigationDelegate: (_) async => NavigationDecision.navigate,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final FakePlatformWebView view =
+        fakePlatformViewsController.createdViews.last;
+    view.storage['localStorage']!['h5Token'] = 'H5';
+    view.fakeOnPageFinishedCallback();
+    await manager.captureSession('tenant-a');
+
+    view.fakeNavigate('https://login.example.com/oauth');
+    await tester.pump();
+    view.storage['localStorage']!['loginToken'] = 'LOGIN';
+    view.fakeOnPageStartedCallback();
+    view.fakeOnPageFinishedCallback();
+    await manager.captureSession('tenant-a');
+
+    final SessionSnapshot snapshot =
+        (await manager.restoreSession('tenant-a'))!;
+
+    expect(
+      snapshot
+          .storageByOrigin['https://h5.example.com']!.localStorage['h5Token'],
+      'H5',
+    );
+    expect(
+      snapshot.storageByOrigin['https://login.example.com']!
+          .localStorage['loginToken'],
+      'LOGIN',
+    );
   });
 
   test('FileSessionWebViewSessionStore has a default cache file path', () {
@@ -1876,6 +2009,8 @@ class _FakeCookieManager {
   bool hasCookies = true;
   final Map<String, List<WebViewCookie>> cookiesByDomain =
       <String, List<WebViewCookie>>{};
+  final Map<String, List<WebViewCookie>> cookiesBySession =
+      <String, List<WebViewCookie>>{};
 
   Future<dynamic> onMethodCall(MethodCall call) {
     switch (call.method) {
@@ -1907,6 +2042,15 @@ class _FakeCookieManager {
               .map((WebViewCookie cookie) => cookie.toMap())
               .toList();
         });
+      case 'getCookiesForSession':
+        final Map<dynamic, dynamic> values =
+            call.arguments as Map<dynamic, dynamic>;
+        final String sessionKey = values['sessionKey'] as String? ?? '';
+        return Future<List<Map<String, dynamic>>>.sync(() {
+          return (cookiesBySession[sessionKey] ?? <WebViewCookie>[])
+              .map((WebViewCookie cookie) => cookie.toMap())
+              .toList();
+        });
       case 'setCookies':
         final List<dynamic> values =
             List<dynamic>.from(call.arguments as List<dynamic>);
@@ -1916,6 +2060,24 @@ class _FakeCookieManager {
           final List<WebViewCookie> cookies = cookiesByDomain.putIfAbsent(
               cookie.domain, () => <WebViewCookie>[]);
           cookies.removeWhere((WebViewCookie item) => item.name == cookie.name);
+          cookies.add(cookie);
+        }
+        return Future<bool>.sync(() => true);
+      case 'setCookiesForSession':
+        final Map<dynamic, dynamic> values =
+            call.arguments as Map<dynamic, dynamic>;
+        final String sessionKey = values['sessionKey'] as String? ?? '';
+        final List<dynamic> cookieValues =
+            List<dynamic>.from(values['cookies'] as List<dynamic>);
+        final List<WebViewCookie> cookies =
+            cookiesBySession.putIfAbsent(sessionKey, () => <WebViewCookie>[]);
+        for (final dynamic value in cookieValues) {
+          final WebViewCookie cookie =
+              WebViewCookie.fromMap(value as Map<dynamic, dynamic>);
+          cookies.removeWhere((WebViewCookie item) =>
+              item.name == cookie.name &&
+              item.domain == cookie.domain &&
+              item.path == cookie.path);
           cookies.add(cookie);
         }
         return Future<bool>.sync(() => true);
@@ -1938,6 +2100,20 @@ class _FakeCookieManager {
           }
         }
         return Future<bool>.sync(() => true);
+      case 'clearWebsiteDataForSession':
+        final Map<dynamic, dynamic> values =
+            call.arguments as Map<dynamic, dynamic>;
+        final String sessionKey = values['sessionKey'] as String? ?? '';
+        final bool includeCookies = values['includeCookies'] as bool? ?? true;
+        final bool includeLocalStorage =
+            values['includeLocalStorage'] as bool? ?? true;
+        if (includeCookies) {
+          cookiesBySession.remove(sessionKey);
+        }
+        if (includeLocalStorage) {
+          FakePlatformWebView.resetSharedStorage();
+        }
+        return Future<bool>.sync(() => true);
       case 'clearWebsiteData':
         final Map<dynamic, dynamic> values =
             call.arguments as Map<dynamic, dynamic>;
@@ -1946,6 +2122,7 @@ class _FakeCookieManager {
             values['includeLocalStorage'] as bool? ?? true;
         if (includeCookies) {
           cookiesByDomain.clear();
+          cookiesBySession.clear();
           hasCookies = false;
         }
         if (includeLocalStorage) {
@@ -1959,6 +2136,7 @@ class _FakeCookieManager {
   void reset() {
     hasCookies = true;
     cookiesByDomain.clear();
+    cookiesBySession.clear();
   }
 
   void setCookiesForDomain(String domain, List<WebViewCookie> cookies) {
@@ -1967,6 +2145,14 @@ class _FakeCookieManager {
 
   List<WebViewCookie> getCookiesForDomain(String domain) {
     return cookiesByDomain[domain] ?? <WebViewCookie>[];
+  }
+
+  void setCookiesForSession(String sessionKey, List<WebViewCookie> cookies) {
+    cookiesBySession[sessionKey] = List<WebViewCookie>.from(cookies);
+  }
+
+  List<WebViewCookie> getCookiesForSession(String sessionKey) {
+    return cookiesBySession[sessionKey] ?? <WebViewCookie>[];
   }
 }
 
@@ -2014,8 +2200,31 @@ class MyWebViewPlatform implements WebViewPlatform {
   }
 
   @override
+  Future<List<WebViewCookie>> getCookiesForSession(String sessionKey) {
+    return Future<List<WebViewCookie>>.sync(() => <WebViewCookie>[]);
+  }
+
+  @override
   Future<void> setCookies(List<WebViewCookie> cookies) {
     return Future<void>.sync(() {});
+  }
+
+  @override
+  Future<void> setCookiesForSession(
+    String sessionKey,
+    List<WebViewCookie> cookies,
+  ) {
+    return Future<void>.sync(() {});
+  }
+
+  @override
+  Future<bool> clearWebsiteDataForSession(
+    String sessionKey, {
+    bool includeCookies = true,
+    bool includeLocalStorage = true,
+    bool includeCache = true,
+  }) {
+    return Future<bool>.sync(() => true);
   }
 
   @override
@@ -2025,6 +2234,29 @@ class MyWebViewPlatform implements WebViewPlatform {
     bool includeCache = true,
   }) {
     return Future<bool>.sync(() => true);
+  }
+}
+
+class _SessionCookiePlatform extends MyWebViewPlatform {
+  _SessionCookiePlatform(this.cookieManager);
+
+  final _FakeCookieManager cookieManager;
+
+  @override
+  Future<List<WebViewCookie>> getCookiesForSession(String sessionKey) {
+    return Future<List<WebViewCookie>>.sync(
+      () => cookieManager.getCookiesForSession(sessionKey),
+    );
+  }
+
+  @override
+  Future<void> setCookiesForSession(
+    String sessionKey,
+    List<WebViewCookie> cookies,
+  ) {
+    return Future<void>.sync(
+      () => cookieManager.setCookiesForSession(sessionKey, cookies),
+    );
   }
 }
 

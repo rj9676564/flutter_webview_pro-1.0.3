@@ -39,6 +39,75 @@ static bool feq(CGFloat a, CGFloat b) { return fabs(b - a) < FLT_EPSILON; }
   XCTAssertNotNil(factory);
 }
 
+- (void)testWebViewWithoutSessionKeyUsesDefaultDataStore {
+  FLWebViewController *controller =
+      [[FLWebViewController alloc] initWithFrame:CGRectMake(0, 0, 300, 400)
+                                  viewIdentifier:1
+                                       arguments:nil
+                                 binaryMessenger:self.mockBinaryMessenger];
+  WKWebView *webView = (WKWebView *)controller.view;
+  XCTAssertEqual(webView.configuration.websiteDataStore, [WKWebsiteDataStore defaultDataStore]);
+}
+
+- (void)testClearingAllWebsiteDataKeepsExistingSessionDataStore {
+  if (@available(iOS 11.0, *)) {
+    NSString *sessionKey = @"test-all-clear-keeps-store";
+    [FLCookieManager removeWebsiteDataStoreForSessionKey:sessionKey];
+    WKWebsiteDataStore *storeBefore = [FLCookieManager websiteDataStoreForSessionKey:sessionKey];
+    FLCookieManager *cookieManager = [[FLCookieManager alloc] init];
+    FlutterMethodCall *call = [FlutterMethodCall
+        methodCallWithMethodName:@"clearWebsiteData"
+                       arguments:@{
+                         @"includeCookies" : @YES,
+                         @"includeLocalStorage" : @YES,
+                         @"includeCache" : @NO,
+                       }];
+    XCTestExpectation *expectation =
+        [self expectationWithDescription:@"clearWebsiteData completes"];
+
+    [cookieManager handleMethodCall:call
+                              result:^(id _Nullable result) {
+                                WKWebsiteDataStore *storeAfter =
+                                    [FLCookieManager websiteDataStoreForSessionKey:sessionKey];
+                                XCTAssertEqual(storeBefore, storeAfter);
+                                [FLCookieManager removeWebsiteDataStoreForSessionKey:sessionKey];
+                                [expectation fulfill];
+                              }];
+
+    [self waitForExpectationsWithTimeout:5 handler:nil];
+  }
+}
+
+- (void)testClearingSessionWebsiteDataKeepsExistingDataStore {
+  if (@available(iOS 11.0, *)) {
+    NSString *sessionKey = @"test-session-clear-keeps-store";
+    [FLCookieManager removeWebsiteDataStoreForSessionKey:sessionKey];
+    WKWebsiteDataStore *storeBefore = [FLCookieManager websiteDataStoreForSessionKey:sessionKey];
+    FLCookieManager *cookieManager = [[FLCookieManager alloc] init];
+    FlutterMethodCall *call = [FlutterMethodCall
+        methodCallWithMethodName:@"clearWebsiteDataForSession"
+                       arguments:@{
+                         @"sessionKey" : sessionKey,
+                         @"includeCookies" : @YES,
+                         @"includeLocalStorage" : @YES,
+                         @"includeCache" : @NO,
+                       }];
+    XCTestExpectation *expectation =
+        [self expectationWithDescription:@"clearWebsiteDataForSession completes"];
+
+    [cookieManager handleMethodCall:call
+                              result:^(id _Nullable result) {
+                                WKWebsiteDataStore *storeAfter =
+                                    [FLCookieManager websiteDataStoreForSessionKey:sessionKey];
+                                XCTAssertEqual(storeBefore, storeAfter);
+                                [FLCookieManager removeWebsiteDataStoreForSessionKey:sessionKey];
+                                [expectation fulfill];
+                              }];
+
+    [self waitForExpectationsWithTimeout:5 handler:nil];
+  }
+}
+
 - (void)webViewContentInsetBehaviorShouldBeNeverOnIOS11 {
   if (@available(iOS 11, *)) {
     FLWebViewController *controller =

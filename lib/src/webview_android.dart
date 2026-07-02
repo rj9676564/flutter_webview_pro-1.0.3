@@ -67,8 +67,25 @@ class AndroidWebView implements WebViewPlatform {
       MethodChannelWebViewPlatform.getCookiesForDomains(domains);
 
   @override
+  Future<List<WebViewCookie>> getCookiesForSession(String sessionKey) {
+    throw UnsupportedError(
+      'Android WebView does not support per-session cookies.',
+    );
+  }
+
+  @override
   Future<void> setCookies(List<WebViewCookie> cookies) =>
       MethodChannelWebViewPlatform.setCookies(cookies);
+
+  @override
+  Future<void> setCookiesForSession(
+    String sessionKey,
+    List<WebViewCookie> cookies,
+  ) {
+    throw UnsupportedError(
+      'Android WebView does not support per-session cookies.',
+    );
+  }
 
   @override
   Future<bool> clearWebsiteDataForDomains(
@@ -83,6 +100,18 @@ class AndroidWebView implements WebViewPlatform {
         includeLocalStorage: includeLocalStorage,
         includeCache: includeCache,
       );
+
+  @override
+  Future<bool> clearWebsiteDataForSession(
+    String sessionKey, {
+    bool includeCookies = true,
+    bool includeLocalStorage = true,
+    bool includeCache = true,
+  }) {
+    throw UnsupportedError(
+      'Android WebView does not support per-session website data clearing.',
+    );
+  }
 
   @override
   Future<bool> clearWebsiteData({
