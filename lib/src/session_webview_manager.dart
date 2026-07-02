@@ -388,7 +388,10 @@ class SessionWebViewManager extends ChangeNotifier {
     SessionWebViewSessionStore? sessionStore,
     this.sessionBindingCapture,
     this.sessionBindingValidator,
-  }) : sessionStore = sessionStore ?? MemorySessionWebViewSessionStore();
+    @visibleForTesting bool? platformSupportsMultipleResidentWebViews,
+  })  : _platformSupportsMultipleResidentWebViews =
+            platformSupportsMultipleResidentWebViews,
+        sessionStore = sessionStore ?? MemorySessionWebViewSessionStore();
 
   /// Maximum number of resident WebView instances.
   ///
@@ -423,6 +426,8 @@ class SessionWebViewManager extends ChangeNotifier {
   /// up and leaving the caller to handle re-authentication or custom fallback.
   final SessionBindingValidator? sessionBindingValidator;
 
+  final bool? _platformSupportsMultipleResidentWebViews;
+
   final CookieManager _cookieManager = CookieManager();
   final Map<String, _SessionWebViewEntry> _entries =
       <String, _SessionWebViewEntry>{};
@@ -446,11 +451,19 @@ class SessionWebViewManager extends ChangeNotifier {
   Iterable<_SessionWebViewEntry> get _residentEntries =>
       _entries.values.where((_SessionWebViewEntry entry) => entry.resident);
 
+  bool get _supportsMultipleResidentWebViews =>
+      _platformSupportsMultipleResidentWebViews ?? Platform.isIOS;
+
   /// Switches the active view to [sessionKey].
   ///
   /// If the session is already resident its existing instance is reused.
   /// Otherwise the manager creates a new instance and restores the most recent
   /// [SessionSnapshot], if one exists.
+  ///
+  /// Android WebView keeps cookies and web storage in process-wide stores, so
+  /// switching to another session drops the previous resident instance after
+  /// capturing a snapshot. iOS keeps per-session website data stores and can
+  /// keep multiple resident instances alive.
   Future<void> switchToSession(
     String sessionKey, {
     required String initialUrl,
@@ -462,11 +475,22 @@ class SessionWebViewManager extends ChangeNotifier {
   ///
   /// This reserves a resident slot and primes restoration for [sessionKey], but it
   /// does not update [currentSessionKey].
+  ///
+  /// On Android this is a no-op for non-current sessions because background
+  /// WebViews would mutate the same process-wide cookie and storage state used
+  /// by the visible session.
   Future<void> warmUpSession(
     String sessionKey, {
     required String initialUrl,
   }) {
-    return _enqueue(() => _ensureResident(sessionKey, initialUrl: initialUrl));
+    return _enqueue(() async {
+      if (!_supportsMultipleResidentWebViews &&
+          _currentSessionKey != sessionKey) {
+        return null;
+      }
+      await _ensureResident(sessionKey, initialUrl: initialUrl);
+      return null;
+    });
   }
 
   /// Captures and persists a session snapshot.
@@ -547,14 +571,7 @@ class SessionWebViewManager extends ChangeNotifier {
       if (entry == null) {
         return;
       }
-      entry.resident = false;
-      entry.controller = null;
-      entry.restoreState = null;
-      entry.widgetKey = UniqueKey();
-      _lru.remove(sessionKey);
-      if (_currentSessionKey == sessionKey) {
-        _currentSessionKey = null;
-      }
+      _dropResidentEntry(sessionKey, clearCurrent: true);
       notifyListeners();
       return null;
     });
@@ -575,14 +592,7 @@ class SessionWebViewManager extends ChangeNotifier {
       if (entry == null || !entry.resident) {
         continue;
       }
-      entry.resident = false;
-      entry.controller = null;
-      entry.restoreState = null;
-      entry.widgetKey = UniqueKey();
-      _lru.remove(sessionKey);
-      if (_currentSessionKey == sessionKey) {
-        _currentSessionKey = null;
-      }
+      _dropResidentEntry(sessionKey, clearCurrent: true);
       changed = true;
     }
     if (changed && notify) {
@@ -674,6 +684,9 @@ class SessionWebViewManager extends ChangeNotifier {
     final String? previousSessionKey = _currentSessionKey;
     if (previousSessionKey != null && previousSessionKey != sessionKey) {
       await _captureSnapshot(previousSessionKey);
+      if (!_supportsMultipleResidentWebViews) {
+        _dropResidentEntry(previousSessionKey);
+      }
     }
     await _ensureResident(sessionKey, initialUrl: initialUrl);
     _currentSessionKey = sessionKey;
@@ -739,11 +752,23 @@ class SessionWebViewManager extends ChangeNotifier {
         _lru.remove(candidate);
         continue;
       }
-      entry.resident = false;
-      entry.controller = null;
-      entry.restoreState = null;
-      entry.widgetKey = UniqueKey();
-      _lru.remove(candidate);
+      _dropResidentEntry(candidate);
+    }
+  }
+
+  void _dropResidentEntry(String sessionKey, {bool clearCurrent = false}) {
+    final _SessionWebViewEntry? entry = _entries[sessionKey];
+    if (entry == null) {
+      _lru.remove(sessionKey);
+      return;
+    }
+    entry.resident = false;
+    entry.controller = null;
+    entry.restoreState = null;
+    entry.widgetKey = UniqueKey();
+    _lru.remove(sessionKey);
+    if (clearCurrent && _currentSessionKey == sessionKey) {
+      _currentSessionKey = null;
     }
   }
 
@@ -751,10 +776,6 @@ class SessionWebViewManager extends ChangeNotifier {
     final _SessionWebViewEntry? entry = _entries[sessionKey];
     final WebViewController? controller = entry?.controller;
     if (entry == null || controller == null) {
-      debugPrint(
-        '[SessionWebViewManager] skip capture, no live controller for '
-        'sessionKey=$sessionKey hasSnapshot=${entry?.snapshot != null}',
-      );
       return entry?.snapshot ?? await sessionStore.read(sessionKey);
     }
 
@@ -839,12 +860,6 @@ class SessionWebViewManager extends ChangeNotifier {
     );
     entry.snapshot = snapshot;
     await sessionStore.write(snapshot);
-    debugPrint(
-      '[SessionWebViewManager] captured sessionKey=$sessionKey '
-      'cookies=${cookies.length} local=${localStorage.length} '
-      'session=${sessionStorage.length} origins=${storageByOrigin.length} '
-      'lastUrl=${snapshot.lastUrl}',
-    );
     return snapshot;
   }
 
@@ -874,20 +889,7 @@ class SessionWebViewManager extends ChangeNotifier {
         return;
       }
       final _SessionRestoreState? restoreState = entry.restoreState;
-      debugPrint(
-          '[SessionWebViewManager] _restoreIfNeeded called for sessionKey=${entry.sessionKey} restoreState=${restoreState != null}');
       if (restoreState != null) {
-        debugPrint(
-          '[SessionWebViewManager] restoring sessionKey=${entry.sessionKey} '
-          'cookies=${restoreState.snapshot.cookies.length} '
-          'local=${restoreState.snapshot.localStorage.length} '
-          'session=${restoreState.snapshot.sessionStorage.length} '
-          'targetUrl=${restoreState.targetUrl} '
-          'reset=${restoreState.resetBeforeRestore} '
-          'restoreCookies=${restoreState.restoreCookies} '
-          'restoreLocal=${restoreState.restoreLocalStorage} '
-          'restoreSession=${restoreState.restoreSessionStorage}',
-        );
         if (restoreState.resetBeforeRestore) {
           await _resetSharedSessionState(entry, controller);
         }
@@ -904,36 +906,15 @@ class SessionWebViewManager extends ChangeNotifier {
           }
         }
         _sharedSessionStateKey = entry.sessionKey;
-        debugPrint(
-            '[SessionWebViewManager] loading targetUrl=${restoreState.targetUrl}');
         await controller.loadUrl(restoreState.targetUrl);
-        debugPrint(
-            '[SessionWebViewManager] loaded targetUrl=${restoreState.targetUrl}');
         return;
       }
-      if (_sharedSessionStateKey == entry.sessionKey) {
-        debugPrint(
-          '[SessionWebViewManager] reusing shared state '
-          'sessionKey=${entry.sessionKey} initialUrl=${entry.initialUrl}',
-        );
-      } else if (_sharedSessionStateKey == null) {
-        debugPrint(
-          '[SessionWebViewManager] adopting existing shared state '
-          'sessionKey=${entry.sessionKey} initialUrl=${entry.initialUrl}',
-        );
-      } else {
-        debugPrint(
-          '[SessionWebViewManager] starting clean '
-          'sessionKey=${entry.sessionKey} initialUrl=${entry.initialUrl}',
-        );
+      if (_sharedSessionStateKey != entry.sessionKey &&
+          _sharedSessionStateKey != null) {
         await _resetSharedSessionState(entry, controller);
       }
       _sharedSessionStateKey = entry.sessionKey;
-      debugPrint(
-          '[SessionWebViewManager] loading initialUrl=${entry.initialUrl}');
       await controller.loadUrl(entry.initialUrl);
-      debugPrint(
-          '[SessionWebViewManager] loaded initialUrl=${entry.initialUrl}');
     } catch (e) {
       debugPrint('[SessionWebViewManager] _restoreIfNeeded error: $e');
     }
@@ -942,19 +923,13 @@ class SessionWebViewManager extends ChangeNotifier {
   Future<void> _onPageFinished(_SessionWebViewEntry entry) async {
     final WebViewController? controller = entry.controller;
     final _SessionRestoreState? restoreState = entry.restoreState;
-    debugPrint(
-        '[SessionWebViewManager] _onPageFinished called for sessionKey=${entry.sessionKey} url=${entry.lastUrl} restoreState=${restoreState != null}');
     if (controller == null) {
       return;
     }
     if (restoreState == null) {
-      debugPrint(
-          '[SessionWebViewManager] _onPageFinished: no restoreState, capturing snapshot');
       await _captureSnapshot(entry.sessionKey);
       return;
     }
-    debugPrint(
-        '[SessionWebViewManager] _onPageFinished: storageRestored=${restoreState.storageRestored}');
     final String? currentOrigin = _originForUrl(entry.lastUrl);
     final OriginStorageSnapshot? originStorage =
         _storageForOrigin(restoreState.snapshot, currentOrigin);
@@ -962,11 +937,7 @@ class SessionWebViewManager extends ChangeNotifier {
         !restoreState.restoredOrigins.contains(currentOrigin)) {
       final bool shouldRestoreStorage = restoreState.restoreLocalStorage ||
           restoreState.restoreSessionStorage;
-      debugPrint(
-          '[SessionWebViewManager] _onPageFinished: shouldRestoreStorage=$shouldRestoreStorage origin=$currentOrigin');
       if (restoreState.restoreLocalStorage) {
-        debugPrint(
-            '[SessionWebViewManager] _onPageFinished: restoring localStorage');
         try {
           await controller.restoreLocalStorage(
             originStorage?.localStorage ?? <String, String>{},
@@ -976,8 +947,6 @@ class SessionWebViewManager extends ChangeNotifier {
         }
       }
       if (restoreState.restoreSessionStorage) {
-        debugPrint(
-            '[SessionWebViewManager] _onPageFinished: restoring sessionStorage');
         try {
           await controller.restoreSessionStorage(
             originStorage?.sessionStorage ?? <String, String>{},
@@ -996,9 +965,7 @@ class SessionWebViewManager extends ChangeNotifier {
           restoredAnyStorage &&
           !restoreState.reloadedAfterRestore) {
         restoreState.reloadedAfterRestore = true;
-        debugPrint('[SessionWebViewManager] _onPageFinished: reloading page');
         await controller.loadUrl(restoreState.targetUrl);
-        debugPrint('[SessionWebViewManager] _onPageFinished: reload triggered');
         return;
       }
     }
@@ -1040,7 +1007,6 @@ class SessionWebViewManager extends ChangeNotifier {
         return;
       }
     }
-    debugPrint('[SessionWebViewManager] _onPageFinished: completing restore');
     entry.restoreState = null;
     await _captureSnapshot(entry.sessionKey);
   }
@@ -1100,11 +1066,6 @@ class SessionWebViewManager extends ChangeNotifier {
           (currentUrl.startsWith('http://') ||
               currentUrl.startsWith('https://'))) {
         await controller.restoreSessionStorage(<String, String>{});
-      } else {
-        debugPrint(
-          '[SessionWebViewManager] skipping sessionStorage reset: '
-          'currentUrl is $currentUrl',
-        );
       }
     } catch (e) {
       debugPrint('[SessionWebViewManager] reset sessionStorage failed: $e');

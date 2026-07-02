@@ -508,7 +508,9 @@ void main() {
 
   testWidgets('SessionWebViewManager reuses resident instances',
       (WidgetTester tester) async {
-    final SessionWebViewManager manager = SessionWebViewManager();
+    final SessionWebViewManager manager = SessionWebViewManager(
+      platformSupportsMultipleResidentWebViews: true,
+    );
 
     await manager.switchToSession('tenant-a',
         initialUrl: 'https://tenant-a.example.com');
@@ -539,6 +541,94 @@ void main() {
     expect(
       manager.residentSessionKeys,
       containsAll(<String>['tenant-a', 'tenant-b']),
+    );
+  });
+
+  testWidgets('SessionWebViewManager keeps a single resident view on Android',
+      (WidgetTester tester) async {
+    final SessionWebViewManager manager = SessionWebViewManager(
+      capacity: 3,
+      platformSupportsMultipleResidentWebViews: false,
+    );
+
+    await manager.switchToSession(
+      'tenant-a',
+      initialUrl: 'https://merchant.example.com',
+    );
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SessionWebViewSwitcher(
+          manager: manager,
+          javascriptMode: JavascriptMode.unrestricted,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final FakePlatformWebView viewA =
+        fakePlatformViewsController.createdViews.last;
+    viewA.fakeOnPageFinishedCallback();
+    await tester.pump();
+    viewA.storage['localStorage']!['token'] = 'A-TOKEN';
+    viewA.storage['sessionStorage']!['tenant'] = 'tenant-a';
+    _fakeCookieManager.setCookiesForDomain(
+      'merchant.example.com',
+      <WebViewCookie>[
+        const WebViewCookie(
+          name: 'sid',
+          value: 'cookie-a',
+          domain: 'merchant.example.com',
+        ),
+      ],
+    );
+
+    await manager.switchToSession(
+      'tenant-b',
+      initialUrl: 'https://merchant.example.com',
+    );
+    await tester.pump();
+    await tester.pump();
+
+    final FakePlatformWebView viewB =
+        fakePlatformViewsController.createdViews.last;
+    expect(viewB, isNot(same(viewA)));
+    expect(manager.residentSessionKeys, <String>['tenant-b']);
+    viewB.fakeOnPageFinishedCallback();
+    await tester.pump();
+
+    expect(viewB.storage['localStorage'], isEmpty);
+    expect(viewB.storage['sessionStorage'], isEmpty);
+    expect(
+      _fakeCookieManager.getCookiesForDomain('merchant.example.com'),
+      isEmpty,
+    );
+
+    await manager.switchToSession(
+      'tenant-a',
+      initialUrl: 'https://merchant.example.com',
+    );
+    await tester.pump();
+    await tester.pump();
+    await tester.pump();
+
+    final FakePlatformWebView restoredViewA =
+        fakePlatformViewsController.createdViews.last;
+    expect(restoredViewA, isNot(same(viewA)));
+    expect(manager.residentSessionKeys, <String>['tenant-a']);
+    restoredViewA.fakeOnPageFinishedCallback();
+    await tester.pump();
+    restoredViewA.fakeOnPageFinishedCallback();
+    await tester.pump();
+
+    expect(restoredViewA.storage['localStorage']!['token'], 'A-TOKEN');
+    expect(restoredViewA.storage['sessionStorage']!['tenant'], 'tenant-a');
+    expect(
+      _fakeCookieManager
+          .getCookiesForDomain('merchant.example.com')
+          .single
+          .value,
+      'cookie-a',
     );
   });
 
