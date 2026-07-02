@@ -16,6 +16,8 @@ static NSMutableDictionary<NSString *, WKWebsiteDataStore *> *FLSessionWebsiteDa
   return stores;
 }
 
+static NSString *const FLSharedAnonymousSessionKey = @"__flutter_webview_pro_shared__";
+
 static NSArray<WKWebsiteDataStore *> *FLAllWebsiteDataStores(void) {
   NSMutableArray<WKWebsiteDataStore *> *stores =
       [NSMutableArray arrayWithObject:[WKWebsiteDataStore defaultDataStore]];
@@ -35,7 +37,7 @@ static NSArray<WKWebsiteDataStore *> *FLAllWebsiteDataStores(void) {
 + (WKWebsiteDataStore *)websiteDataStoreForSessionKey:(NSString *_Nullable)sessionKey {
   NSString *normalized = [self normalizedSessionKey:sessionKey];
   if (normalized.length == 0) {
-    return [WKWebsiteDataStore defaultDataStore];
+    normalized = FLSharedAnonymousSessionKey;
   }
   @synchronized (FLSessionWebsiteDataStores()) {
     WKWebsiteDataStore *store = FLSessionWebsiteDataStores()[normalized];
@@ -244,6 +246,7 @@ static NSArray<WKWebsiteDataStore *> *FLAllWebsiteDataStores(void) {
     [self clearWebsiteDataInStores:FLAllWebsiteDataStores()
                          dataTypes:websiteDataTypes
                         completion:^(BOOL hadData) {
+                          [FLCookieManager removeAllSessionWebsiteDataStores];
                           result(@(hadData));
                         }];
   } else {
@@ -409,6 +412,7 @@ static NSArray<WKWebsiteDataStore *> *FLAllWebsiteDataStores(void) {
     }
 
     [self clearWebsiteDataInStores:FLAllWebsiteDataStores() dataTypes:dataTypes completion:^(BOOL hadData) {
+      [FLCookieManager removeAllSessionWebsiteDataStores];
       result(@(hadData));
     }];
   } else {

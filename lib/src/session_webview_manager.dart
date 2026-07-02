@@ -1018,20 +1018,20 @@ class SessionWebViewManager extends ChangeNotifier {
         } else {
           await _cookieManager.setCookies(restoreState.snapshot.cookies);
         }
-        final OriginStorageSnapshot retryStorage =
-            _storageForOrigin(restoreState.snapshot, currentOrigin) ??
-                OriginStorageSnapshot(
-                  localStorage: restoreState.snapshot.localStorage,
-                  sessionStorage: restoreState.snapshot.sessionStorage,
-                );
+        final OriginStorageSnapshot? retryStorage =
+            _storageForOrigin(restoreState.snapshot, currentOrigin);
         try {
-          await controller.restoreLocalStorage(retryStorage.localStorage);
+          await controller.restoreLocalStorage(
+            retryStorage?.localStorage ?? <String, String>{},
+          );
         } catch (e) {
           debugPrint(
               '[SessionWebViewManager] retry restoreLocalStorage failed: $e');
         }
         try {
-          await controller.restoreSessionStorage(retryStorage.sessionStorage);
+          await controller.restoreSessionStorage(
+            retryStorage?.sessionStorage ?? <String, String>{},
+          );
         } catch (e) {
           debugPrint(
               '[SessionWebViewManager] retry restoreSessionStorage failed: $e');

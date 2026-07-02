@@ -39,17 +39,19 @@ static bool feq(CGFloat a, CGFloat b) { return fabs(b - a) < FLT_EPSILON; }
   XCTAssertNotNil(factory);
 }
 
-- (void)testWebViewWithoutSessionKeyUsesDefaultDataStore {
+- (void)testWebViewWithoutSessionKeyUsesSharedAnonymousDataStore {
   FLWebViewController *controller =
       [[FLWebViewController alloc] initWithFrame:CGRectMake(0, 0, 300, 400)
                                   viewIdentifier:1
                                        arguments:nil
                                  binaryMessenger:self.mockBinaryMessenger];
   WKWebView *webView = (WKWebView *)controller.view;
-  XCTAssertEqual(webView.configuration.websiteDataStore, [WKWebsiteDataStore defaultDataStore]);
+  XCTAssertEqual(webView.configuration.websiteDataStore,
+                 [FLCookieManager websiteDataStoreForSessionKey:nil]);
+  XCTAssertNotEqual(webView.configuration.websiteDataStore, [WKWebsiteDataStore defaultDataStore]);
 }
 
-- (void)testClearingAllWebsiteDataKeepsExistingSessionDataStore {
+- (void)testClearingAllWebsiteDataReleasesExistingSessionDataStore {
   if (@available(iOS 11.0, *)) {
     NSString *sessionKey = @"test-all-clear-keeps-store";
     [FLCookieManager removeWebsiteDataStoreForSessionKey:sessionKey];
@@ -69,7 +71,7 @@ static bool feq(CGFloat a, CGFloat b) { return fabs(b - a) < FLT_EPSILON; }
                               result:^(id _Nullable result) {
                                 WKWebsiteDataStore *storeAfter =
                                     [FLCookieManager websiteDataStoreForSessionKey:sessionKey];
-                                XCTAssertEqual(storeBefore, storeAfter);
+                                XCTAssertNotEqual(storeBefore, storeAfter);
                                 [FLCookieManager removeWebsiteDataStoreForSessionKey:sessionKey];
                                 [expectation fulfill];
                               }];

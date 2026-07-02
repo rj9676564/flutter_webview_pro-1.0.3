@@ -7,6 +7,8 @@ package com.wzm.webviewflutter;
 import android.content.Context;
 import android.os.Build;
 import android.os.Build.VERSION_CODES;
+import android.os.Handler;
+import android.os.Looper;
 import android.webkit.CookieManager;
 import android.webkit.CookieSyncManager;
 import android.webkit.ValueCallback;
@@ -23,6 +25,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import io.flutter.plugin.common.BinaryMessenger;
 import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
@@ -32,6 +36,7 @@ import io.flutter.plugin.common.MethodChannel.Result;
 class FlutterCookieManager implements MethodCallHandler {
   private final MethodChannel methodChannel;
   private final Context context;
+  private static final Handler MAIN_HANDLER = new Handler(Looper.getMainLooper());
 
   private static class CookieWrite {
     final String url;
@@ -99,7 +104,7 @@ class FlutterCookieManager implements MethodCallHandler {
           new ValueCallback<Boolean>() {
             @Override
             public void onReceiveValue(Boolean value) {
-              result.success(hasCookies);
+              successOnMainThread(result, hasCookies);
             }
           });
     } else {
@@ -169,7 +174,7 @@ class FlutterCookieManager implements MethodCallHandler {
         new ValueCallback<Boolean>() {
           @Override
           public void onReceiveValue(Boolean hadLocalStorage) {
-            result.success(hadData || Boolean.TRUE.equals(hadLocalStorage));
+            successOnMainThread(result, hadData || Boolean.TRUE.equals(hadLocalStorage));
           }
         });
   }
@@ -295,23 +300,41 @@ class FlutterCookieManager implements MethodCallHandler {
       return;
     }
 
-    final int[] pending = new int[] {writes.size()};
-    final boolean[] completed = new boolean[] {false};
+    final AtomicInteger pending = new AtomicInteger(writes.size());
+    final AtomicBoolean completed = new AtomicBoolean(false);
     final ValueCallback<Boolean> callback =
         new ValueCallback<Boolean>() {
           @Override
           public void onReceiveValue(Boolean value) {
-            pending[0] -= 1;
-            if (pending[0] == 0 && !completed[0]) {
-              completed[0] = true;
-              flushCookies(cookieManager);
-              result.success(null);
+            if (pending.decrementAndGet() == 0 && completed.compareAndSet(false, true)) {
+              MAIN_HANDLER.post(
+                  new Runnable() {
+                    @Override
+                    public void run() {
+                      flushCookies(cookieManager);
+                      result.success(null);
+                    }
+                  });
             }
           }
         };
     for (CookieWrite write : writes) {
       cookieManager.setCookie(write.url, write.header, callback);
     }
+  }
+
+  private static void successOnMainThread(final Result result, final Object value) {
+    if (Looper.myLooper() == Looper.getMainLooper()) {
+      result.success(value);
+      return;
+    }
+    MAIN_HANDLER.post(
+        new Runnable() {
+          @Override
+          public void run() {
+            result.success(value);
+          }
+        });
   }
 
   private boolean clearWebsiteDataForHosts(

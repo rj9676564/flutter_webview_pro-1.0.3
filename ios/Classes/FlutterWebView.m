@@ -96,9 +96,7 @@
     _sessionKey = sessionKey;
 
     WKWebViewConfiguration* configuration = [[WKWebViewConfiguration alloc] init];
-    _websiteDataStore = sessionKey.length > 0
-        ? [FLCookieManager websiteDataStoreForSessionKey:sessionKey]
-        : [WKWebsiteDataStore defaultDataStore];
+    _websiteDataStore = [FLCookieManager websiteDataStoreForSessionKey:sessionKey];
     configuration.websiteDataStore = _websiteDataStore;
     [self applyConfigurationSettings:settings toConfiguration:configuration];
     configuration.userContentController = userContentController;

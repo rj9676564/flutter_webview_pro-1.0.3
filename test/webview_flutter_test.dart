@@ -1194,6 +1194,55 @@ void main() {
     );
   });
 
+  testWidgets(
+      'SessionWebViewManager retry does not inject fallback storage '
+      'into a different origin', (WidgetTester tester) async {
+    final SessionWebViewManager manager = SessionWebViewManager(
+      capacity: 1,
+      restoreLastUrlOnReopen: false,
+      sessionStore: MemorySessionWebViewSessionStore(),
+      sessionBindingValidator: (String sessionKey, String? binding) => false,
+    );
+    await manager.sessionStore.write(
+      SessionSnapshot(
+        sessionKey: 'tenant-a',
+        cookies: const <WebViewCookie>[],
+        cookieDomains: const <String>['shop.example.com'],
+        localStorage: const <String, String>{'token': 'SHOP_TOKEN'},
+        sessionStorage: const <String, String>{'tenant': 'shop'},
+        lastUrl: 'https://shop.example.com/home',
+        updatedAt: DateTime.fromMillisecondsSinceEpoch(1),
+      ),
+    );
+    await manager.restoreSession('tenant-a');
+
+    await manager.switchToSession(
+      'tenant-a',
+      initialUrl: 'https://auth.example.com/callback',
+    );
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SessionWebViewSwitcher(
+          manager: manager,
+          javascriptMode: JavascriptMode.unrestricted,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final FakePlatformWebView restoredView =
+        fakePlatformViewsController.createdViews.last;
+    restoredView.fakeOnPageFinishedCallback();
+    await tester.pump();
+    restoredView.fakeOnPageFinishedCallback();
+    await tester.pump();
+
+    expect(restoredView.currentUrl, 'https://auth.example.com/callback');
+    expect(restoredView.storage['localStorage'], isEmpty);
+    expect(restoredView.storage['sessionStorage'], isEmpty);
+  });
+
   test('FileSessionWebViewSessionStore has a default cache file path', () {
     final FileSessionWebViewSessionStore store =
         FileSessionWebViewSessionStore();
