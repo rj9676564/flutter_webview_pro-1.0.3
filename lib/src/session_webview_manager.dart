@@ -69,6 +69,29 @@ abstract class SessionWebViewSessionStore {
   Future<void> delete(String sessionKey);
 }
 
+/// Optional store capability for remembering which session owns the shared
+/// platform WebView state across process restarts.
+///
+/// Android keeps cookies and DOM storage process-wide *and* on disk, so after a
+/// process kill the platform store still holds the last session's data — it is
+/// more current than any snapshot, because a kill skips the capture that would
+/// have written one. Without this capability the manager cannot tell "fresh
+/// process, same session as before" from "someone else's leftovers", so it
+/// conservatively resets, destroying exactly the state that survived.
+///
+/// Implement this and the two cases become distinguishable: reopening the owning
+/// session after a kill reuses the platform store untouched, which is also what
+/// a normal exit does. Ownership is recorded when a session *acquires* the
+/// store, never on release, so a kill cannot skip the write.
+abstract class SessionWebViewSharedStateOwnerStore
+    implements SessionWebViewSessionStore {
+  /// Reads the session key that last owned the shared platform state.
+  Future<String?> readSharedStateOwner();
+
+  /// Records [sessionKey] as the owner of the shared platform state.
+  Future<void> writeSharedStateOwner(String? sessionKey);
+}
+
 /// Optional store capability for clearing every persisted snapshot.
 ///
 /// Implement this when using a persistent store and logout should remove all
@@ -111,7 +134,9 @@ class MemorySessionWebViewSessionStore
 /// Use this when session snapshots need to survive app process restarts.
 /// The store writes one JSON file containing snapshots keyed by session key.
 class FileSessionWebViewSessionStore
-    implements SessionWebViewClearableSessionStore {
+    implements
+        SessionWebViewClearableSessionStore,
+        SessionWebViewSharedStateOwnerStore {
   /// Creates a file-backed store.
   ///
   /// When [filePath] is omitted, snapshots are stored under
@@ -139,12 +164,56 @@ class FileSessionWebViewSessionStore
     return file;
   }
 
+  // Kept beside the snapshot file rather than inside it: that JSON is a flat
+  // sessionKey -> snapshot map, and a reserved key there could collide with a
+  // real session key.
+  Future<File> get _ownerFile async {
+    await _file;
+    return File('$filePath.owner');
+  }
+
+  @override
+  Future<String?> readSharedStateOwner() async {
+    try {
+      final File file = await _ownerFile;
+      if (!await file.exists()) {
+        return null;
+      }
+      final String content = (await file.readAsString()).trim();
+      return content.isEmpty ? null : content;
+    } catch (error) {
+      debugPrint(
+        '[FileSessionWebViewSessionStore] read owner failed error=$error',
+      );
+      return null;
+    }
+  }
+
+  @override
+  Future<void> writeSharedStateOwner(String? sessionKey) async {
+    try {
+      final File file = await _ownerFile;
+      if (sessionKey == null || sessionKey.isEmpty) {
+        if (await file.exists()) {
+          await file.delete();
+        }
+        return;
+      }
+      await file.writeAsString(sessionKey, flush: true);
+    } catch (error) {
+      debugPrint(
+        '[FileSessionWebViewSessionStore] write owner failed error=$error',
+      );
+    }
+  }
+
   @override
   Future<void> clear() async {
     final File file = await _file;
     if (await file.exists()) {
       await file.delete();
     }
+    await writeSharedStateOwner(null);
   }
 
   @override
@@ -385,6 +454,8 @@ class SessionWebViewManager extends ChangeNotifier {
     this.capacity = 3,
     this.restoreLastUrlOnReopen = false,
     this.additionalCookieDomains,
+    this.preservedLocalStorageDomains,
+    this.ephemeralCookieDomains,
     SessionWebViewSessionStore? sessionStore,
     this.sessionBindingCapture,
     this.sessionBindingValidator,
@@ -411,6 +482,25 @@ class SessionWebViewManager extends ChangeNotifier {
   /// Most integrations can leave this unset and rely on the `initialUrl` host.
   final List<String>? additionalCookieDomains;
 
+  /// Domains whose origin-scoped local storage must survive shared-state resets.
+  ///
+  /// Cookies are still cleared for these domains. This is useful when several
+  /// hosts share a registrable-domain cookie, while only one host's local storage
+  /// belongs to a persistent session.
+  final List<String>? preservedLocalStorageDomains;
+
+  /// Domains whose cookies and web storage must never enter a [SessionSnapshot].
+  ///
+  /// Use this for third-party auth relays (OAuth hand-off hosts and the like):
+  /// their state is short-lived and process-wide, so persisting it would silently
+  /// re-authenticate the next visit — even after [disposeSession] cleared the
+  /// platform WebView store — and would resurrect a stale binding after the app
+  /// process is killed mid-flow.
+  ///
+  /// Domains listed here are also stripped from any snapshot already on disk when
+  /// [disposeSession] clears them from the platform store.
+  final List<String>? ephemeralCookieDomains;
+
   /// Snapshot persistence store.
   final SessionWebViewSessionStore sessionStore;
 
@@ -435,9 +525,41 @@ class SessionWebViewManager extends ChangeNotifier {
   Future<void> _serial = Future<void>.value();
   String? _currentSessionKey;
   String? _sharedSessionStateKey;
+  bool _sharedStateOwnerLoaded = false;
 
   /// Current active session key.
   String? get currentSessionKey => _currentSessionKey;
+
+  /// Records who owns the shared platform state, on disk as well as in memory.
+  ///
+  /// Called when a session *acquires* the store, so a process kill cannot skip
+  /// it. Restoring the value on the next launch is what lets the manager tell
+  /// "fresh process, same session" from "another session's leftovers".
+  void _setSharedStateOwner(String? sessionKey) {
+    _sharedSessionStateKey = sessionKey;
+    _sharedStateOwnerLoaded = true;
+    final SessionWebViewSessionStore store = sessionStore;
+    if (store is SessionWebViewSharedStateOwnerStore) {
+      _ignore(store.writeSharedStateOwner(sessionKey));
+    }
+  }
+
+  /// Loads the persisted owner once per process, before the first reset decision.
+  Future<void> _ensureSharedStateOwnerLoaded() async {
+    if (_sharedStateOwnerLoaded) {
+      return;
+    }
+    _sharedStateOwnerLoaded = true;
+    final SessionWebViewSessionStore store = sessionStore;
+    if (store is! SessionWebViewSharedStateOwnerStore) {
+      return;
+    }
+    try {
+      _sharedSessionStateKey ??= await store.readSharedStateOwner();
+    } catch (e) {
+      debugPrint('[SessionWebViewManager] read shared state owner failed: $e');
+    }
+  }
 
   /// Resident session keys in the pool.
   ///
@@ -463,7 +585,9 @@ class SessionWebViewManager extends ChangeNotifier {
   /// Android WebView keeps cookies and web storage in process-wide stores, so
   /// switching to another session drops the previous resident instance after
   /// capturing a snapshot. iOS keeps per-session website data stores and can
-  /// keep multiple resident instances alive.
+  /// keep multiple resident instances alive. On Android, a first session with no
+  /// snapshot starts from a clean shared WebView store instead of adopting
+  /// untracked process state left by a previous manager instance.
   Future<void> switchToSession(
     String sessionKey, {
     required String initialUrl,
@@ -510,7 +634,7 @@ class SessionWebViewManager extends ChangeNotifier {
         _currentSessionKey = null;
       }
       if (_sharedSessionStateKey == sessionKey) {
-        _sharedSessionStateKey = null;
+        _setSharedStateOwner(null);
       }
       await sessionStore.delete(sessionKey);
       notifyListeners();
@@ -555,7 +679,7 @@ class SessionWebViewManager extends ChangeNotifier {
       _entries.clear();
       _lru.clear();
       _currentSessionKey = null;
-      _sharedSessionStateKey = null;
+      _setSharedStateOwner(null);
       notifyListeners();
       return null;
     });
@@ -565,13 +689,85 @@ class SessionWebViewManager extends ChangeNotifier {
   ///
   /// This intentionally drops the live page state but retains the recoverable
   /// session layer already captured by [captureSession] or page-finished hooks.
-  Future<void> disposeSession(String sessionKey) {
+  ///
+  /// When [clearCookieDomainsOnClose] is non-empty, cookies, local storage, and
+  /// cache for those domains are cleared from the shared platform WebView store
+  /// on close. This is opt-in per call: callers should pass domains that are
+  /// typically third-party auth relays whose data is not session-scoped (e.g.
+  /// process-wide on Android), so leaving it behind risks leaking into the next
+  /// session that touches the same domain.
+  Future<void> disposeSession(
+    String sessionKey, {
+    List<String>? clearCookieDomainsOnClose,
+  }) {
     return _enqueue(() async {
       final _SessionWebViewEntry? entry = _entries[sessionKey];
       if (entry == null) {
         return;
       }
       _dropResidentEntry(sessionKey, clearCurrent: true);
+      final List<String>? domains = clearCookieDomainsOnClose
+          ?.where((String value) => value.trim().isNotEmpty)
+          .toList(growable: false);
+      if (domains != null && domains.isNotEmpty) {
+        try {
+          await _clearWebsiteDataForDomains(domains);
+        } catch (e) {
+          debugPrint(
+              '[SessionWebViewManager] clearWebsiteDataForDomains failed: $e');
+        }
+      }
+      // Clearing the platform store is not enough: a snapshot written earlier in
+      // this page's life (or by a previous app version) would restore the very
+      // cookies that were just cleared.
+      await _purgeEphemeralStateFromStore(sessionKey);
+      notifyListeners();
+      return null;
+    });
+  }
+
+  /// Disposes [sessionKey] and forgets it entirely: the resident instance, the
+  /// in-memory entry, and the persisted snapshot.
+  ///
+  /// Use this for caller-keyed one-shot sessions — a fresh, never-repeating key
+  /// per visit. [disposeSession] deliberately keeps the snapshot, so a unique
+  /// key would leave one unreachable snapshot behind on every visit and grow the
+  /// session store without bound.
+  Future<void> forgetSession(
+    String sessionKey, {
+    List<String>? clearCookieDomainsOnClose,
+  }) {
+    return _enqueue(() async {
+      final _SessionWebViewEntry? entry = _entries[sessionKey];
+      // Whatever this session actually visited must go too. A one-shot session
+      // exists precisely so its third-party login does not outlive it, and the
+      // hosts it touched are known only from its own navigation — a caller-side
+      // static list cannot name them.
+      final Set<String> targets = <String>{...?entry?.cookieDomains};
+      _dropResidentEntry(sessionKey, clearCurrent: true);
+      _entries.remove(sessionKey);
+      if (_sharedSessionStateKey == sessionKey) {
+        // The platform store no longer belongs to anyone; force the next session
+        // to reset it instead of inheriting this one's leftovers.
+        _setSharedStateOwner(null);
+      }
+      targets.addAll(clearCookieDomainsOnClose ?? const <String>[]);
+      final List<String> domains = targets
+          .where((String value) => value.trim().isNotEmpty)
+          .toList(growable: false);
+      if (domains.isNotEmpty) {
+        try {
+          await _clearWebsiteDataForDomains(domains);
+        } catch (e) {
+          debugPrint(
+              '[SessionWebViewManager] clearWebsiteDataForDomains failed: $e');
+        }
+      }
+      try {
+        await sessionStore.delete(sessionKey);
+      } catch (e) {
+        debugPrint('[SessionWebViewManager] delete snapshot failed: $e');
+      }
       notifyListeners();
       return null;
     });
@@ -698,6 +894,10 @@ class SessionWebViewManager extends ChangeNotifier {
     String sessionKey, {
     required String initialUrl,
   }) async {
+    // Must happen before any resetBeforeRestore decision: on a fresh process the
+    // in-memory owner is null, which would read as "someone else's leftovers"
+    // and wipe the platform state that survived a process kill.
+    await _ensureSharedStateOwnerLoaded();
     final _SessionWebViewEntry entry = _entryFor(sessionKey, initialUrl);
     entry.initialUrl = initialUrl;
     if (entry.snapshot == null) {
@@ -711,7 +911,15 @@ class SessionWebViewManager extends ChangeNotifier {
           ..addAll(entry.snapshot!.storageByOrigin.keys);
       }
     }
-    if (entry.resident && entry.controller != null) {
+    // Reusing the live instance is only safe when the shared platform store is
+    // still ours. On Android cookies and DOM storage are process-wide, so another
+    // session closing underneath us can clear the domains this page depends on
+    // while its WebView stays perfectly alive — resident does not imply intact.
+    // Falling through rebuilds the instance and arms the reset/restore path.
+    if (entry.resident &&
+        entry.controller != null &&
+        (_supportsMultipleResidentWebViews ||
+            _sharedSessionStateKey == sessionKey)) {
       return;
     }
     await _evictIfNeeded(protectedSessionKey: sessionKey);
@@ -726,9 +934,9 @@ class SessionWebViewManager extends ChangeNotifier {
             ? (entry.snapshot!.lastUrl ?? initialUrl)
             : initialUrl,
         resetBeforeRestore: !sharedStateMatches,
-        restoreCookies: !sharedStateMatches,
-        restoreLocalStorage: !sharedStateMatches,
-        restoreSessionStorage: !sharedStateMatches,
+        restoreCookies: !sharedStateMatches || Platform.isIOS,
+        restoreLocalStorage: true,
+        restoreSessionStorage: true,
       );
     } else {
       entry.restoreState = null;
@@ -782,7 +990,8 @@ class SessionWebViewManager extends ChangeNotifier {
     final SessionSnapshot? previousSnapshot =
         entry.snapshot ?? await sessionStore.read(sessionKey);
     final List<String> cookieDomains = _cookieDomainsForEntry(entry);
-    final List<WebViewCookie> cookies = await _capturePart<List<WebViewCookie>>(
+    final List<WebViewCookie> capturedCookies =
+        await _capturePart<List<WebViewCookie>>(
       sessionKey: sessionKey,
       label: 'cookies',
       fallback: previousSnapshot?.cookies ?? <WebViewCookie>[],
@@ -790,6 +999,11 @@ class SessionWebViewManager extends ChangeNotifier {
           ? _cookieManager.getCookiesForSession(sessionKey)
           : _cookieManager.getCookiesForDomains(cookieDomains),
     );
+    // Auth-relay cookies are cleared from the platform store on close; keeping
+    // them in the snapshot would restore the login the next time round.
+    final List<WebViewCookie> cookies = capturedCookies
+        .where((WebViewCookie cookie) => !_isEphemeralHost(cookie.domain))
+        .toList(growable: false);
     final Map<String, String> localStorage =
         await _capturePart<Map<String, String>>(
       sessionKey: sessionKey,
@@ -812,9 +1026,13 @@ class SessionWebViewManager extends ChangeNotifier {
     );
     final String? currentOrigin =
         _originForUrl(currentUrl ?? entry.lastUrl ?? entry.initialUrl);
+    final bool currentOriginIsEphemeral = _isEphemeralOrigin(currentOrigin);
     final Map<String, OriginStorageSnapshot> storageByOrigin =
         <String, OriginStorageSnapshot>{
-      if (previousSnapshot != null) ...previousSnapshot.storageByOrigin,
+      if (previousSnapshot != null)
+        for (final MapEntry<String, OriginStorageSnapshot> origin
+            in previousSnapshot.storageByOrigin.entries)
+          if (!_isEphemeralOrigin(origin.key)) origin.key: origin.value,
     };
     if (storageByOrigin.isEmpty &&
         previousSnapshot != null &&
@@ -828,7 +1046,7 @@ class SessionWebViewManager extends ChangeNotifier {
         );
       }
     }
-    if (currentOrigin != null) {
+    if (currentOrigin != null && !currentOriginIsEphemeral) {
       storageByOrigin[currentOrigin] = OriginStorageSnapshot(
         localStorage: localStorage,
         sessionStorage: sessionStorage,
@@ -844,17 +1062,26 @@ class SessionWebViewManager extends ChangeNotifier {
             action: () => sessionBindingCapture!(sessionKey, controller),
           );
 
+    // Capturing while the auth relay is on screen must not leave the relay as
+    // the snapshot's origin, or reopening would resume the hand-off half-done.
+    final String? resolvedLastUrl = currentUrl ??
+        entry.lastUrl ??
+        previousSnapshot?.lastUrl ??
+        entry.initialUrl;
     final SessionSnapshot snapshot = SessionSnapshot(
       sessionKey: sessionKey,
       cookies: cookies,
-      cookieDomains: cookieDomains,
-      localStorage: localStorage,
-      sessionStorage: sessionStorage,
+      cookieDomains: cookieDomains
+          .where((String domain) => !_isEphemeralHost(domain))
+          .toList(growable: false),
+      localStorage:
+          currentOriginIsEphemeral ? <String, String>{} : localStorage,
+      sessionStorage:
+          currentOriginIsEphemeral ? <String, String>{} : sessionStorage,
       storageByOrigin: storageByOrigin,
-      lastUrl: currentUrl ??
-          entry.lastUrl ??
-          previousSnapshot?.lastUrl ??
-          entry.initialUrl,
+      lastUrl: _isEphemeralOrigin(resolvedLastUrl)
+          ? entry.initialUrl
+          : resolvedLastUrl,
       sessionBinding: binding,
       updatedAt: DateTime.now(),
     );
@@ -891,7 +1118,18 @@ class SessionWebViewManager extends ChangeNotifier {
       final _SessionRestoreState? restoreState = entry.restoreState;
       if (restoreState != null) {
         if (restoreState.resetBeforeRestore) {
-          await _resetSharedSessionState(entry, controller);
+          // Only wipe DOM storage when the snapshot can put it back. A fresh
+          // process always takes this branch, and after a process kill the
+          // snapshot on disk predates the login — no capture ever ran. Clearing
+          // then would discard the only surviving copy of the H5 token, and the
+          // first page load would fail auth. Cookies are cleared either way,
+          // since the snapshot always carries those.
+          await _resetSharedSessionState(
+            entry,
+            controller,
+            includeLocalStorage:
+                _snapshotHasStoredStorage(restoreState.snapshot),
+          );
         }
         if (restoreState.restoreCookies) {
           // Cookies are restored before the initial navigation so server-side auth
@@ -905,15 +1143,23 @@ class SessionWebViewManager extends ChangeNotifier {
             await _cookieManager.setCookies(restoreState.snapshot.cookies);
           }
         }
-        _sharedSessionStateKey = entry.sessionKey;
+        _setSharedStateOwner(entry.sessionKey);
         await controller.loadUrl(restoreState.targetUrl);
         return;
       }
-      if (_sharedSessionStateKey != entry.sessionKey &&
-          _sharedSessionStateKey != null) {
-        await _resetSharedSessionState(entry, controller);
+      final bool shouldResetSharedState =
+          _sharedSessionStateKey != entry.sessionKey &&
+              (_sharedSessionStateKey != null ||
+                  !_supportsMultipleResidentWebViews);
+      if (shouldResetSharedState) {
+        await _resetSharedSessionState(
+          entry,
+          controller,
+          clearAllPlatformData: _sharedSessionStateKey == null &&
+              !_supportsMultipleResidentWebViews,
+        );
       }
-      _sharedSessionStateKey = entry.sessionKey;
+      _setSharedStateOwner(entry.sessionKey);
       await controller.loadUrl(entry.initialUrl);
     } catch (e) {
       debugPrint('[SessionWebViewManager] _restoreIfNeeded error: $e');
@@ -937,20 +1183,24 @@ class SessionWebViewManager extends ChangeNotifier {
         !restoreState.restoredOrigins.contains(currentOrigin)) {
       final bool shouldRestoreStorage = restoreState.restoreLocalStorage ||
           restoreState.restoreSessionStorage;
-      if (restoreState.restoreLocalStorage) {
+      // A snapshot holding nothing for this origin means "nothing was ever
+      // captured here", not "this origin must end up empty". restoreLocalStorage
+      // clears before writing, so restoring an empty map would destroy state the
+      // platform legitimately kept — most visibly the login token that survives a
+      // process kill, where no capture ever ran and the snapshot on disk predates
+      // the login. Deliberate clearing is the reset path's job, not this one's.
+      if (restoreState.restoreLocalStorage &&
+          (originStorage?.localStorage.isNotEmpty ?? false)) {
         try {
-          await controller.restoreLocalStorage(
-            originStorage?.localStorage ?? <String, String>{},
-          );
+          await controller.restoreLocalStorage(originStorage!.localStorage);
         } catch (e) {
           debugPrint('[SessionWebViewManager] restoreLocalStorage failed: $e');
         }
       }
-      if (restoreState.restoreSessionStorage) {
+      if (restoreState.restoreSessionStorage &&
+          (originStorage?.sessionStorage.isNotEmpty ?? false)) {
         try {
-          await controller.restoreSessionStorage(
-            originStorage?.sessionStorage ?? <String, String>{},
-          );
+          await controller.restoreSessionStorage(originStorage!.sessionStorage);
         } catch (e) {
           debugPrint(
               '[SessionWebViewManager] restoreSessionStorage failed: $e');
@@ -965,7 +1215,10 @@ class SessionWebViewManager extends ChangeNotifier {
           restoredAnyStorage &&
           !restoreState.reloadedAfterRestore) {
         restoreState.reloadedAfterRestore = true;
-        await controller.loadUrl(restoreState.targetUrl);
+        // The first navigation runs before origin-scoped storage can be
+        // restored. Loading the same URL again is not guaranteed to restart a
+        // SPA, so force a real reload after the storage rewrite.
+        await controller.reload();
         return;
       }
     }
@@ -987,23 +1240,25 @@ class SessionWebViewManager extends ChangeNotifier {
         }
         final OriginStorageSnapshot? retryStorage =
             _storageForOrigin(restoreState.snapshot, currentOrigin);
-        try {
-          await controller.restoreLocalStorage(
-            retryStorage?.localStorage ?? <String, String>{},
-          );
-        } catch (e) {
-          debugPrint(
-              '[SessionWebViewManager] retry restoreLocalStorage failed: $e');
+        // Same rule as above: an empty snapshot must not wipe live storage.
+        if (retryStorage?.localStorage.isNotEmpty ?? false) {
+          try {
+            await controller.restoreLocalStorage(retryStorage!.localStorage);
+          } catch (e) {
+            debugPrint(
+                '[SessionWebViewManager] retry restoreLocalStorage failed: $e');
+          }
         }
-        try {
-          await controller.restoreSessionStorage(
-            retryStorage?.sessionStorage ?? <String, String>{},
-          );
-        } catch (e) {
-          debugPrint(
-              '[SessionWebViewManager] retry restoreSessionStorage failed: $e');
+        if (retryStorage?.sessionStorage.isNotEmpty ?? false) {
+          try {
+            await controller
+                .restoreSessionStorage(retryStorage!.sessionStorage);
+          } catch (e) {
+            debugPrint(
+                '[SessionWebViewManager] retry restoreSessionStorage failed: $e');
+          }
         }
-        await controller.loadUrl(restoreState.targetUrl);
+        await controller.reload();
         return;
       }
     }
@@ -1027,29 +1282,72 @@ class SessionWebViewManager extends ChangeNotifier {
     _lru.add(sessionKey);
   }
 
+  /// Whether [snapshot] carries any DOM storage that a restore could write back.
+  bool _snapshotHasStoredStorage(SessionSnapshot snapshot) {
+    if (snapshot.localStorage.isNotEmpty ||
+        snapshot.sessionStorage.isNotEmpty) {
+      return true;
+    }
+    return snapshot.storageByOrigin.values.any(
+      (OriginStorageSnapshot storage) =>
+          storage.localStorage.isNotEmpty || storage.sessionStorage.isNotEmpty,
+    );
+  }
+
   Future<void> _resetSharedSessionState(
     _SessionWebViewEntry entry,
-    WebViewController controller,
-  ) async {
+    WebViewController controller, {
+    bool clearAllPlatformData = false,
+    bool includeLocalStorage = true,
+  }) async {
     final List<String> domains = _cookieDomainsForSharedStateReset(entry);
     if (Platform.isIOS) {
       try {
         await _cookieManager.clearWebsiteDataForSession(
           entry.sessionKey,
           includeCookies: true,
-          includeLocalStorage: true,
+          includeLocalStorage: includeLocalStorage,
           includeCache: false,
         );
       } catch (e) {
         debugPrint(
             '[SessionWebViewManager] clearWebsiteDataForSession failed: $e');
       }
+    } else if (clearAllPlatformData &&
+        (preservedLocalStorageDomains == null ||
+            preservedLocalStorageDomains!.isEmpty)) {
+      try {
+        await _cookieManager.clearWebsiteData(
+          includeCookies: true,
+          includeLocalStorage: includeLocalStorage,
+          includeCache: false,
+        );
+      } catch (e) {
+        debugPrint('[SessionWebViewManager] clearWebsiteData failed: $e');
+      }
+    } else if (clearAllPlatformData) {
+      try {
+        await _cookieManager.clearWebsiteData(
+          includeCookies: true,
+          includeLocalStorage: false,
+          includeCache: false,
+        );
+        if (includeLocalStorage) {
+          await _clearWebsiteDataForDomains(
+            domains,
+            includeCookies: false,
+            includeLocalStorage: true,
+            includeCache: false,
+          );
+        }
+      } catch (e) {
+        debugPrint('[SessionWebViewManager] clearWebsiteData failed: $e');
+      }
     } else if (domains.isNotEmpty) {
       try {
-        await _cookieManager.clearWebsiteDataForDomains(
+        await _clearWebsiteDataForDomains(
           domains,
-          includeCookies: true,
-          includeLocalStorage: true,
+          includeLocalStorage: includeLocalStorage,
           includeCache: false,
         );
       } catch (e) {
@@ -1070,6 +1368,162 @@ class SessionWebViewManager extends ChangeNotifier {
     } catch (e) {
       debugPrint('[SessionWebViewManager] reset sessionStorage failed: $e');
     }
+  }
+
+  Future<void> _clearWebsiteDataForDomains(
+    List<String> domains, {
+    bool includeCookies = true,
+    bool includeLocalStorage = true,
+    bool includeCache = true,
+  }) async {
+    final List<String> normalizedDomains = domains
+        .where((String value) => value.trim().isNotEmpty)
+        .toList(growable: false);
+    if (normalizedDomains.isEmpty) {
+      return;
+    }
+    final List<String> localStorageDomains = Platform.isIOS
+        ? normalizedDomains
+        : normalizedDomains
+            .where((String domain) => !_isPreservedLocalStorageHost(domain))
+            .toList(growable: false);
+    final bool mustSplit = includeLocalStorage &&
+        localStorageDomains.length != normalizedDomains.length;
+    if (!mustSplit) {
+      await _cookieManager.clearWebsiteDataForDomains(
+        normalizedDomains,
+        includeCookies: includeCookies,
+        includeLocalStorage: includeLocalStorage,
+        includeCache: includeCache,
+      );
+      return;
+    }
+
+    if (includeCookies || includeCache) {
+      await _cookieManager.clearWebsiteDataForDomains(
+        normalizedDomains,
+        includeCookies: includeCookies,
+        includeLocalStorage: false,
+        includeCache: includeCache,
+      );
+    }
+    if (localStorageDomains.isNotEmpty) {
+      await _cookieManager.clearWebsiteDataForDomains(
+        localStorageDomains,
+        includeCookies: false,
+        includeLocalStorage: true,
+        includeCache: false,
+      );
+    }
+  }
+
+  bool _isPreservedLocalStorageHost(String? host) {
+    final List<String>? domains = preservedLocalStorageDomains;
+    if (host == null || host.isEmpty || domains == null || domains.isEmpty) {
+      return false;
+    }
+    final String normalized = host.trim().toLowerCase();
+    for (final String domain in domains) {
+      final String candidate = domain.trim().toLowerCase();
+      if (candidate.isNotEmpty &&
+          (normalized == candidate || normalized.endsWith('.$candidate'))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Rewrites the stored snapshot for [sessionKey] without ephemeral state.
+  Future<void> _purgeEphemeralStateFromStore(String sessionKey) async {
+    final List<String>? domains = ephemeralCookieDomains;
+    if (domains == null || domains.isEmpty) {
+      return;
+    }
+    try {
+      final SessionSnapshot? stored = await sessionStore.read(sessionKey);
+      if (stored == null) {
+        return;
+      }
+      final SessionSnapshot? purged = _stripEphemeralState(stored);
+      if (purged == null) {
+        return;
+      }
+      await sessionStore.write(purged);
+      final _SessionWebViewEntry? entry = _entries[sessionKey];
+      if (entry != null) {
+        entry.snapshot = purged;
+        entry.cookieDomains.removeWhere(_isEphemeralHost);
+        entry.origins.removeWhere(_isEphemeralOrigin);
+      }
+    } catch (e) {
+      debugPrint('[SessionWebViewManager] purge ephemeral state failed: $e');
+    }
+  }
+
+  /// Whether [host] belongs to a domain that must never be persisted.
+  bool _isEphemeralHost(String? host) {
+    final List<String>? domains = ephemeralCookieDomains;
+    if (host == null || host.isEmpty || domains == null || domains.isEmpty) {
+      return false;
+    }
+    final String normalized = host.toLowerCase();
+    for (final String domain in domains) {
+      final String candidate = domain.trim().toLowerCase();
+      if (candidate.isEmpty) {
+        continue;
+      }
+      if (normalized == candidate || normalized.endsWith('.$candidate')) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Whether the origin string [origin] resolves to an ephemeral host.
+  bool _isEphemeralOrigin(String? origin) {
+    if (origin == null || origin.isEmpty) {
+      return false;
+    }
+    return _isEphemeralHost(_uriForWebUrl(origin)?.host);
+  }
+
+  /// Drops every ephemeral cookie/origin from [snapshot].
+  ///
+  /// Returns null when nothing had to be stripped.
+  SessionSnapshot? _stripEphemeralState(SessionSnapshot snapshot) {
+    final List<WebViewCookie> cookies = snapshot.cookies
+        .where((WebViewCookie cookie) => !_isEphemeralHost(cookie.domain))
+        .toList(growable: false);
+    final List<String> cookieDomains = snapshot.cookieDomains
+        .where((String domain) => !_isEphemeralHost(domain))
+        .toList(growable: false);
+    final Map<String, OriginStorageSnapshot> storageByOrigin =
+        <String, OriginStorageSnapshot>{
+      for (final MapEntry<String, OriginStorageSnapshot> entry
+          in snapshot.storageByOrigin.entries)
+        if (!_isEphemeralOrigin(entry.key)) entry.key: entry.value,
+    };
+    final bool lastUrlIsEphemeral = _isEphemeralOrigin(snapshot.lastUrl);
+    if (cookies.length == snapshot.cookies.length &&
+        cookieDomains.length == snapshot.cookieDomains.length &&
+        storageByOrigin.length == snapshot.storageByOrigin.length &&
+        !lastUrlIsEphemeral) {
+      return null;
+    }
+    return SessionSnapshot(
+      sessionKey: snapshot.sessionKey,
+      cookies: cookies,
+      cookieDomains: cookieDomains,
+      // The flat maps mirror lastUrl's origin; drop them with it.
+      localStorage:
+          lastUrlIsEphemeral ? <String, String>{} : snapshot.localStorage,
+      sessionStorage:
+          lastUrlIsEphemeral ? <String, String>{} : snapshot.sessionStorage,
+      storageByOrigin: storageByOrigin,
+      lastUrl: lastUrlIsEphemeral ? null : snapshot.lastUrl,
+      sessionBinding: snapshot.sessionBinding,
+      updatedAt: snapshot.updatedAt,
+    );
   }
 
   List<String> _cookieDomainsForEntry(_SessionWebViewEntry entry) {

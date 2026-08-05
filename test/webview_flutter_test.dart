@@ -618,6 +618,7 @@ void main() {
     expect(manager.residentSessionKeys, <String>['tenant-a']);
     restoredViewA.fakeOnPageFinishedCallback();
     await tester.pump();
+    expect(restoredViewA.amountOfReloadsOnCurrentUrl, 1);
     restoredViewA.fakeOnPageFinishedCallback();
     await tester.pump();
 
@@ -630,6 +631,111 @@ void main() {
           .value,
       'cookie-a',
     );
+  });
+
+  testWidgets(
+      'SessionWebViewManager preserves configured Android local storage on forget',
+      (WidgetTester tester) async {
+    const String hardwareHost = 'aiot-rush.ele.me';
+    const String retailHost = 'nr.ele.me';
+    FakePlatformWebView.seedLocalStorage(
+      'https://$hardwareHost/',
+      <String, String>{'ele-aiot-rush-token': 'HARDWARE-TOKEN'},
+    );
+    FakePlatformWebView.seedLocalStorage(
+      'https://$retailHost/',
+      <String, String>{'retail-token': 'RETAIL-TOKEN'},
+    );
+    _fakeCookieManager.setCookiesForDomain(
+      hardwareHost,
+      <WebViewCookie>[
+        const WebViewCookie(
+          name: 'IOT_U_TOKEN',
+          value: 'shared-token',
+          domain: hardwareHost,
+        ),
+      ],
+    );
+    _fakeCookieManager.setCookiesForDomain(
+      retailHost,
+      <WebViewCookie>[
+        const WebViewCookie(
+          name: 'IOT_U_TOKEN',
+          value: 'shared-token',
+          domain: retailHost,
+        ),
+      ],
+    );
+    final SessionWebViewManager manager = SessionWebViewManager(
+      platformSupportsMultipleResidentWebViews: false,
+      additionalCookieDomains: const <String>[hardwareHost, retailHost],
+      preservedLocalStorageDomains: const <String>[hardwareHost],
+    );
+
+    await manager.switchToSession(
+      'retail-one-shot',
+      initialUrl: 'https://$retailHost/',
+    );
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SessionWebViewSwitcher(
+          manager: manager,
+          javascriptMode: JavascriptMode.unrestricted,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(
+      FakePlatformWebView.localStorageForUrl('https://$hardwareHost/'),
+      <String, String>{'ele-aiot-rush-token': 'HARDWARE-TOKEN'},
+    );
+    expect(
+      FakePlatformWebView.localStorageForUrl('https://$retailHost/'),
+      isEmpty,
+    );
+
+    // Simulate state created by the retail login after the entry reset.
+    FakePlatformWebView.seedLocalStorage(
+      'https://$retailHost/',
+      <String, String>{'retail-token': 'RETAIL-TOKEN'},
+    );
+    _fakeCookieManager.setCookiesForDomain(
+      hardwareHost,
+      <WebViewCookie>[
+        const WebViewCookie(
+          name: 'IOT_U_TOKEN',
+          value: 'retail-login-token',
+          domain: hardwareHost,
+        ),
+      ],
+    );
+    _fakeCookieManager.setCookiesForDomain(
+      retailHost,
+      <WebViewCookie>[
+        const WebViewCookie(
+          name: 'IOT_U_TOKEN',
+          value: 'retail-login-token',
+          domain: retailHost,
+        ),
+      ],
+    );
+    await manager.forgetSession(
+      'retail-one-shot',
+      clearCookieDomainsOnClose: const <String>[hardwareHost, retailHost],
+    );
+
+    expect(
+      FakePlatformWebView.localStorageForUrl('https://$hardwareHost/'),
+      <String, String>{'ele-aiot-rush-token': 'HARDWARE-TOKEN'},
+    );
+    expect(
+      FakePlatformWebView.localStorageForUrl('https://$retailHost/'),
+      isEmpty,
+    );
+    expect(_fakeCookieManager.getCookiesForDomain(hardwareHost), isEmpty);
+    expect(_fakeCookieManager.getCookiesForDomain(retailHost), isEmpty);
   });
 
   testWidgets(
@@ -1063,7 +1169,10 @@ void main() {
       'https://merchant.example.com/',
       <String, String>{'token': 'EXISTING-TOKEN'},
     );
-    final SessionWebViewManager manager = SessionWebViewManager(capacity: 2);
+    final SessionWebViewManager manager = SessionWebViewManager(
+      capacity: 2,
+      platformSupportsMultipleResidentWebViews: true,
+    );
 
     await manager.switchToSession(
       'tenant-a',
@@ -1089,6 +1198,51 @@ void main() {
           .single
           .value,
       'existing-cookie',
+    );
+  });
+
+  testWidgets('SessionWebViewManager clears first untracked Android state',
+      (WidgetTester tester) async {
+    _fakeCookieManager.setCookiesForDomain(
+      'merchant.example.com',
+      <WebViewCookie>[
+        const WebViewCookie(
+          name: 'sid',
+          value: 'existing-cookie',
+          domain: 'merchant.example.com',
+        ),
+      ],
+    );
+    FakePlatformWebView.seedLocalStorage(
+      'https://merchant.example.com/',
+      <String, String>{'token': 'EXISTING-TOKEN'},
+    );
+    final SessionWebViewManager manager = SessionWebViewManager(
+      capacity: 2,
+      platformSupportsMultipleResidentWebViews: false,
+    );
+
+    await manager.switchToSession(
+      'tenant-b',
+      initialUrl: 'https://merchant.example.com',
+    );
+    await tester.pumpWidget(
+      Directionality(
+        textDirection: TextDirection.ltr,
+        child: SessionWebViewSwitcher(
+          manager: manager,
+          javascriptMode: JavascriptMode.unrestricted,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final FakePlatformWebView view =
+        fakePlatformViewsController.createdViews.last;
+    expect(view.storage['localStorage'], isEmpty);
+    expect(
+      _fakeCookieManager.getCookiesForDomain('merchant.example.com'),
+      isEmpty,
     );
   });
 
@@ -2123,6 +2277,12 @@ class FakePlatformWebView {
   static void seedLocalStorage(String url, Map<String, String> values) {
     _localStorageByOrigin[_originForUrl(url)] = Map<String, String>.from(
       values,
+    );
+  }
+
+  static Map<String, String> localStorageForUrl(String url) {
+    return Map<String, String>.from(
+      _localStorageByOrigin[_originForUrl(url)] ?? <String, String>{},
     );
   }
 

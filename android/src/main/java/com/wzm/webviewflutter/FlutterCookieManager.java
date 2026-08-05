@@ -14,12 +14,14 @@ import android.webkit.CookieSyncManager;
 import android.webkit.ValueCallback;
 import android.webkit.WebStorage;
 import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import java.text.SimpleDateFormat;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -37,6 +39,10 @@ class FlutterCookieManager implements MethodCallHandler {
   private final MethodChannel methodChannel;
   private final Context context;
   private static final Handler MAIN_HANDLER = new Handler(Looper.getMainLooper());
+  /** Per-origin budget for the offscreen localStorage cleanup, in milliseconds. */
+  private static final long DOM_STORAGE_CLEAR_TIMEOUT_MS = 1500;
+  /** Past Expires value used to delete cookies on WebViews that ignore Max-Age. */
+  private static final String EPOCH_EXPIRES = "Thu, 01 Jan 1970 00:00:00 GMT";
 
   private static class CookieWrite {
     final String url;
@@ -377,25 +383,31 @@ class FlutterCookieManager implements MethodCallHandler {
           continue;
         }
         String name = cookie.substring(0, equalsIndex);
+        // Pre-Lollipop WebViews ignore Max-Age, so pair it with an Expires in
+        // the past; newer ones honour whichever comes first.
+        String expiry = "Max-Age=0; Expires=" + EPOCH_EXPIRES;
         cookieManager.setCookie(
             url,
             String.format(
                 Locale.US,
-                "%s=; Max-Age=0; Path=/",
-                name));
+                "%s=; %s; Path=/",
+                name,
+                expiry));
         for (String domain : domainsToExpire) {
           String expiredCookie = String.format(
               Locale.US,
-              "%s=; Max-Age=0; Path=/; Domain=%s",
+              "%s=; %s; Path=/; Domain=%s",
               name,
+              expiry,
               domain);
           cookieManager.setCookie(url, expiredCookie);
           cookieManager.setCookie(
               url,
               String.format(
                   Locale.US,
-                  "%s=; Max-Age=0; Path=/; Domain=.%s",
+                  "%s=; %s; Path=/; Domain=.%s",
                   name,
+                  expiry,
                   domain));
         }
       }
@@ -546,7 +558,7 @@ class FlutterCookieManager implements MethodCallHandler {
     return format.format(new Date(timestampMillis));
   }
 
-  private static void clearLocalStorageForHosts(
+  private void clearLocalStorageForHosts(
       final Set<String> hosts,
       final ValueCallback<Boolean> callback) {
     final WebStorage webStorage = WebStorage.getInstance();
@@ -568,7 +580,116 @@ class FlutterCookieManager implements MethodCallHandler {
                 }
               }
             }
-            callback.onReceiveValue(hadData);
+            // WebStorage.getOrigins() only enumerates Web SQL / AppCache origins on
+            // Chromium-backed WebViews, so DOM localStorage survives deleteOrigin().
+            // Clear it per origin through an offscreen WebView instead.
+            clearDomStorageForHosts(hosts, hadData, callback);
+          }
+        });
+  }
+
+  /// Clears localStorage/sessionStorage for each host by loading a blank document
+  /// under that origin and running JS against it. No network request is made.
+  private void clearDomStorageForHosts(
+      final Set<String> hosts,
+      final boolean hadData,
+      final ValueCallback<Boolean> callback) {
+    if (context == null
+        || hosts.isEmpty()
+        || Build.VERSION.SDK_INT < VERSION_CODES.KITKAT) {
+      callback.onReceiveValue(hadData);
+      return;
+    }
+    MAIN_HANDLER.post(
+        new Runnable() {
+          @Override
+          public void run() {
+            final WebView webView;
+            try {
+              webView = new WebView(context);
+            } catch (Exception e) {
+              callback.onReceiveValue(hadData);
+              return;
+            }
+            webView.getSettings().setJavaScriptEnabled(true);
+            webView.getSettings().setDomStorageEnabled(true);
+
+            final Iterator<String> iterator = new ArrayList<>(hosts).iterator();
+            final AtomicBoolean cleared = new AtomicBoolean(hadData);
+            final AtomicBoolean finished = new AtomicBoolean(false);
+            final Runnable[] next = new Runnable[1];
+
+            next[0] =
+                new Runnable() {
+                  @Override
+                  public void run() {
+                    if (!iterator.hasNext()) {
+                      if (finished.compareAndSet(false, true)) {
+                        webView.destroy();
+                        callback.onReceiveValue(cleared.get());
+                      }
+                      return;
+                    }
+                    // Guards against onPageFinished/onReceivedError/timeout all
+                    // advancing the same host.
+                    final AtomicBoolean done = new AtomicBoolean(false);
+                    final Runnable advance =
+                        new Runnable() {
+                          @Override
+                          public void run() {
+                            if (done.compareAndSet(false, true)) {
+                              next[0].run();
+                            }
+                          }
+                        };
+                    webView.setTag(advance);
+                    webView.loadDataWithBaseURL(
+                        "https://" + iterator.next() + "/",
+                        "<html><body></body></html>",
+                        "text/html",
+                        "utf-8",
+                        null);
+                    MAIN_HANDLER.postDelayed(advance, DOM_STORAGE_CLEAR_TIMEOUT_MS);
+                  }
+                };
+
+            webView.setWebViewClient(
+                new WebViewClient() {
+                  @Override
+                  public void onPageFinished(WebView view, String url) {
+                    if (finished.get()) {
+                      // The WebView has already been destroyed by a timeout race.
+                      return;
+                    }
+                    final Object tag = view.getTag();
+                    final Runnable advance = tag instanceof Runnable ? (Runnable) tag : null;
+                    view.evaluateJavascript(
+                        "(function(){try{localStorage.clear();sessionStorage.clear();"
+                            + "return '1';}catch(e){return '0';}})();",
+                        new ValueCallback<String>() {
+                          @Override
+                          public void onReceiveValue(String value) {
+                            if (value != null && value.contains("1")) {
+                              cleared.set(true);
+                            }
+                            if (advance != null) {
+                              advance.run();
+                            }
+                          }
+                        });
+                  }
+
+                  @Override
+                  public void onReceivedError(
+                      WebView view, int errorCode, String description, String failingUrl) {
+                    final Object tag = view.getTag();
+                    if (tag instanceof Runnable) {
+                      ((Runnable) tag).run();
+                    }
+                  }
+                });
+
+            next[0].run();
           }
         });
   }
