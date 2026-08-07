@@ -53,6 +53,17 @@ typedef SessionBindingValidator = bool Function(
   String? restoredBinding,
 );
 
+/// Builds the first URL loaded for a restored session.
+///
+/// Some web apps keep recoverable credentials in DOM storage but initialize
+/// request clients only from entry URL parameters. This callback lets callers
+/// rebuild that transient bootstrap URL from the captured [SessionSnapshot].
+typedef SessionRestoreUrlBuilder = String Function(
+  String sessionKey,
+  String targetUrl,
+  SessionSnapshot snapshot,
+);
+
 /// Persists [SessionSnapshot] objects for later recovery.
 ///
 /// The store keeps the recoverable session layer only: cookies, storage,
@@ -434,6 +445,7 @@ class _SessionWebViewEntry {
   SessionSnapshot? snapshot;
   final LinkedHashSet<String> cookieDomains = LinkedHashSet<String>();
   final LinkedHashSet<String> origins = LinkedHashSet<String>();
+  bool persistSnapshot = true;
   bool resident = false;
   _SessionRestoreState? restoreState;
 }
@@ -459,6 +471,7 @@ class SessionWebViewManager extends ChangeNotifier {
     SessionWebViewSessionStore? sessionStore,
     this.sessionBindingCapture,
     this.sessionBindingValidator,
+    this.restoreUrlBuilder,
     @visibleForTesting bool? platformSupportsMultipleResidentWebViews,
   })  : _platformSupportsMultipleResidentWebViews =
             platformSupportsMultipleResidentWebViews,
@@ -515,6 +528,9 @@ class SessionWebViewManager extends ChangeNotifier {
   /// When validation fails the manager retries one restore pass before giving
   /// up and leaving the caller to handle re-authentication or custom fallback.
   final SessionBindingValidator? sessionBindingValidator;
+
+  /// Optional callback for adding transient bootstrap state to a restore URL.
+  final SessionRestoreUrlBuilder? restoreUrlBuilder;
 
   final bool? _platformSupportsMultipleResidentWebViews;
 
@@ -591,8 +607,15 @@ class SessionWebViewManager extends ChangeNotifier {
   Future<void> switchToSession(
     String sessionKey, {
     required String initialUrl,
+    bool persistSnapshot = true,
   }) {
-    return _enqueue(() => _switchToSession(sessionKey, initialUrl: initialUrl));
+    return _enqueue(
+      () => _switchToSession(
+        sessionKey,
+        initialUrl: initialUrl,
+        persistSnapshot: persistSnapshot,
+      ),
+    );
   }
 
   /// Prepares a session WebView without making it active.
@@ -744,6 +767,13 @@ class SessionWebViewManager extends ChangeNotifier {
       // hosts it touched are known only from its own navigation — a caller-side
       // static list cannot name them.
       final Set<String> targets = <String>{...?entry?.cookieDomains};
+      final List<String> localStorageDomains =
+          (entry?.origins ?? const <String>{})
+              .map((String origin) => _uriForWebUrl(origin)?.host ?? '')
+              .where((String host) =>
+                  host.isNotEmpty && !_isPreservedLocalStorageHost(host))
+              .toSet()
+              .toList(growable: false);
       _dropResidentEntry(sessionKey, clearCurrent: true);
       _entries.remove(sessionKey);
       if (_sharedSessionStateKey == sessionKey) {
@@ -757,10 +787,24 @@ class SessionWebViewManager extends ChangeNotifier {
           .toList(growable: false);
       if (domains.isNotEmpty) {
         try {
-          await _clearWebsiteDataForDomains(domains);
+          await _clearWebsiteDataForDomains(
+            domains,
+            includeLocalStorage: false,
+          );
         } catch (e) {
           debugPrint(
               '[SessionWebViewManager] clearWebsiteDataForDomains failed: $e');
+        }
+      }
+      if (localStorageDomains.isNotEmpty) {
+        try {
+          await _clearWebsiteDataForDomains(
+            localStorageDomains,
+            includeCookies: false,
+            includeCache: false,
+          );
+        } catch (e) {
+          debugPrint('[SessionWebViewManager] clear localStorage failed: $e');
         }
       }
       try {
@@ -876,6 +920,7 @@ class SessionWebViewManager extends ChangeNotifier {
   Future<void> _switchToSession(
     String sessionKey, {
     required String initialUrl,
+    required bool persistSnapshot,
   }) async {
     final String? previousSessionKey = _currentSessionKey;
     if (previousSessionKey != null && previousSessionKey != sessionKey) {
@@ -884,7 +929,11 @@ class SessionWebViewManager extends ChangeNotifier {
         _dropResidentEntry(previousSessionKey);
       }
     }
-    await _ensureResident(sessionKey, initialUrl: initialUrl);
+    await _ensureResident(
+      sessionKey,
+      initialUrl: initialUrl,
+      persistSnapshot: persistSnapshot,
+    );
     _currentSessionKey = sessionKey;
     _touch(sessionKey);
     notifyListeners();
@@ -893,6 +942,7 @@ class SessionWebViewManager extends ChangeNotifier {
   Future<void> _ensureResident(
     String sessionKey, {
     required String initialUrl,
+    bool persistSnapshot = true,
   }) async {
     // Must happen before any resetBeforeRestore decision: on a fresh process the
     // in-memory owner is null, which would read as "someone else's leftovers"
@@ -900,7 +950,12 @@ class SessionWebViewManager extends ChangeNotifier {
     await _ensureSharedStateOwnerLoaded();
     final _SessionWebViewEntry entry = _entryFor(sessionKey, initialUrl);
     entry.initialUrl = initialUrl;
-    if (entry.snapshot == null) {
+    entry.persistSnapshot = persistSnapshot;
+    if (!persistSnapshot) {
+      entry.snapshot = null;
+      entry.restoreState = null;
+      await sessionStore.delete(sessionKey);
+    } else if (entry.snapshot == null) {
       entry.snapshot = await sessionStore.read(sessionKey);
       if (entry.snapshot != null) {
         entry.cookieDomains
@@ -930,9 +985,12 @@ class SessionWebViewManager extends ChangeNotifier {
       final bool sharedStateMatches = _sharedSessionStateKey == sessionKey;
       entry.restoreState = _SessionRestoreState(
         snapshot: entry.snapshot!,
-        targetUrl: restoreLastUrlOnReopen
-            ? (entry.snapshot!.lastUrl ?? initialUrl)
-            : initialUrl,
+        targetUrl: _buildRestoreTargetUrl(
+          entry,
+          restoreLastUrlOnReopen
+              ? (entry.snapshot!.lastUrl ?? initialUrl)
+              : initialUrl,
+        ),
         resetBeforeRestore: !sharedStateMatches,
         restoreCookies: !sharedStateMatches || Platform.isIOS,
         restoreLocalStorage: true,
@@ -940,6 +998,26 @@ class SessionWebViewManager extends ChangeNotifier {
       );
     } else {
       entry.restoreState = null;
+    }
+  }
+
+  String _buildRestoreTargetUrl(
+    _SessionWebViewEntry entry,
+    String targetUrl,
+  ) {
+    final SessionRestoreUrlBuilder? builder = restoreUrlBuilder;
+    final SessionSnapshot? snapshot = entry.snapshot;
+    if (builder == null || snapshot == null) {
+      return targetUrl;
+    }
+    try {
+      return builder(entry.sessionKey, targetUrl, snapshot);
+    } catch (error) {
+      debugPrint(
+        '[SessionWebViewManager] build restore URL failed '
+        'sessionKey=${entry.sessionKey} error=$error',
+      );
+      return targetUrl;
     }
   }
 
@@ -982,6 +1060,10 @@ class SessionWebViewManager extends ChangeNotifier {
 
   Future<SessionSnapshot?> _captureSnapshot(String sessionKey) async {
     final _SessionWebViewEntry? entry = _entries[sessionKey];
+    if (entry?.persistSnapshot == false) {
+      entry!.snapshot = null;
+      return null;
+    }
     final WebViewController? controller = entry?.controller;
     if (entry == null || controller == null) {
       return entry?.snapshot ?? await sessionStore.read(sessionKey);
@@ -1216,9 +1298,30 @@ class SessionWebViewManager extends ChangeNotifier {
           !restoreState.reloadedAfterRestore) {
         restoreState.reloadedAfterRestore = true;
         // The first navigation runs before origin-scoped storage can be
-        // restored. Loading the same URL again is not guaranteed to restart a
-        // SPA, so force a real reload after the storage rewrite.
-        await controller.reload();
+        // restored and the app may already have redirected to its login route.
+        // Resume the requested entry URL after the rewrite; reloading here
+        // would only refresh that stale login route.
+        //
+        // Rewriting storage restores data, not the JS memory built from it. The
+        // H5 sets `axios.defaults.headers['u-token']` at login *alongside* the
+        // localStorage write, so a document that already finished bootstrapping
+        // keeps sending header-less requests — the page looks logged in and the
+        // API answers `header required: u-token`. Only a fresh document run
+        // rebuilds those defaults.
+        //
+        // loadUrl alone is not a fresh run: when the SPA redirected via its hash
+        // router, targetUrl differs from the current address only by fragment and
+        // Android treats it as a same-document navigation, executing no script.
+        // That is exactly why pulling to refresh by hand fixed it. Force the
+        // reload in that case.
+        final String? currentUrl = await controller.currentUrl();
+        final bool sameDocument = currentUrl != null &&
+            _withoutFragment(currentUrl) ==
+                _withoutFragment(restoreState.targetUrl);
+        await controller.loadUrl(restoreState.targetUrl);
+        if (sameDocument) {
+          await controller.reload();
+        }
         return;
       }
     }
@@ -1300,7 +1403,9 @@ class SessionWebViewManager extends ChangeNotifier {
     bool clearAllPlatformData = false,
     bool includeLocalStorage = true,
   }) async {
-    final List<String> domains = _cookieDomainsForSharedStateReset(entry);
+    final List<String> cookieDomains = _cookieDomainsForSharedStateReset(entry);
+    final List<String> localStorageDomains =
+        _localStorageDomainsForSharedStateReset(entry);
     if (Platform.isIOS) {
       try {
         await _cookieManager.clearWebsiteDataForSession(
@@ -1313,18 +1418,6 @@ class SessionWebViewManager extends ChangeNotifier {
         debugPrint(
             '[SessionWebViewManager] clearWebsiteDataForSession failed: $e');
       }
-    } else if (clearAllPlatformData &&
-        (preservedLocalStorageDomains == null ||
-            preservedLocalStorageDomains!.isEmpty)) {
-      try {
-        await _cookieManager.clearWebsiteData(
-          includeCookies: true,
-          includeLocalStorage: includeLocalStorage,
-          includeCache: false,
-        );
-      } catch (e) {
-        debugPrint('[SessionWebViewManager] clearWebsiteData failed: $e');
-      }
     } else if (clearAllPlatformData) {
       try {
         await _cookieManager.clearWebsiteData(
@@ -1332,9 +1425,9 @@ class SessionWebViewManager extends ChangeNotifier {
           includeLocalStorage: false,
           includeCache: false,
         );
-        if (includeLocalStorage) {
+        if (includeLocalStorage && localStorageDomains.isNotEmpty) {
           await _clearWebsiteDataForDomains(
-            domains,
+            localStorageDomains,
             includeCookies: false,
             includeLocalStorage: true,
             includeCache: false,
@@ -1343,13 +1436,23 @@ class SessionWebViewManager extends ChangeNotifier {
       } catch (e) {
         debugPrint('[SessionWebViewManager] clearWebsiteData failed: $e');
       }
-    } else if (domains.isNotEmpty) {
+    } else {
       try {
-        await _clearWebsiteDataForDomains(
-          domains,
-          includeLocalStorage: includeLocalStorage,
-          includeCache: false,
-        );
+        if (cookieDomains.isNotEmpty) {
+          await _clearWebsiteDataForDomains(
+            cookieDomains,
+            includeLocalStorage: false,
+            includeCache: false,
+          );
+        }
+        if (includeLocalStorage && localStorageDomains.isNotEmpty) {
+          await _clearWebsiteDataForDomains(
+            localStorageDomains,
+            includeCookies: false,
+            includeLocalStorage: true,
+            includeCache: false,
+          );
+        }
       } catch (e) {
         debugPrint(
             '[SessionWebViewManager] clearWebsiteDataForDomains failed: $e');
@@ -1555,6 +1658,24 @@ class SessionWebViewManager extends ChangeNotifier {
     return domains.toList(growable: false);
   }
 
+  List<String> _localStorageDomainsForSharedStateReset(
+    _SessionWebViewEntry entry,
+  ) {
+    final Set<String> origins = <String>{...entry.origins};
+    final String? sharedSessionStateKey = _sharedSessionStateKey;
+    if (sharedSessionStateKey != null) {
+      origins.addAll(
+        _entries[sharedSessionStateKey]?.origins ?? const <String>{},
+      );
+    }
+    return origins
+        .map((String origin) => _uriForWebUrl(origin)?.host ?? '')
+        .where((String host) =>
+            host.isNotEmpty && !_isPreservedLocalStorageHost(host))
+        .toSet()
+        .toList(growable: false);
+  }
+
   void _recordCookieDomain(_SessionWebViewEntry entry, String? url) {
     if (url == null || url.isEmpty) {
       return;
@@ -1593,6 +1714,15 @@ class SessionWebViewManager extends ChangeNotifier {
       }
     }
     return null;
+  }
+
+  /// [url] without its `#fragment`, i.e. the part that identifies the document.
+  ///
+  /// Two URLs equal under this are the same document to the WebView: navigating
+  /// between them never re-runs the page's scripts.
+  String _withoutFragment(String url) {
+    final int hash = url.indexOf('#');
+    return hash < 0 ? url : url.substring(0, hash);
   }
 
   String? _originForUrl(String? url) {
