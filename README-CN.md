@@ -11,6 +11,43 @@
 - 清理全部 WebView Cookie。
 - 使用 `CookieManager.clearCookiesForDomains` 按域名清理 WebView Cookie。
 - 使用 `SessionWebViewManager` 管理按 session 隔离的 WebView 会话。
+- 使用 `WebViewProxy` 为 Android WebView 配置 HTTP/SOCKS 代理。
+
+## WebView 代理
+
+在创建或加载 WebView 之前配置代理：
+
+```dart
+import 'package:flutter_webview_pro/webview_flutter.dart';
+
+await WebViewProxy.setProxy('192.168.1.152:9090');
+// 显式指定 HTTP 代理协议：
+// await WebViewProxy.setProxy('http://192.168.1.152:9090');
+// SOCKS 代理：
+// await WebViewProxy.setProxy('socks5://127.0.0.1:1080');
+```
+
+支持 `host:port`、`http://host:port` 和 `socks5://host:port` 格式。传入
+`null` 或空字符串可以清除代理覆盖，恢复默认网络连接：
+
+```dart
+await WebViewProxy.clearProxy();
+```
+
+Android 使用 AndroidX WebKit 的 `ProxyController`，代理会作用于当前 App
+进程中的 WebView。代理配置是异步应用的，因此创建或加载 WebView 前需要
+等待 `setProxy` 完成。设备上的 Android System WebView/Chrome 需要支持代理
+覆盖功能，过旧的 WebView 可能会忽略该请求。
+
+iOS 的 `WKWebView` 没有应用级代理覆盖能力。为了保持跨平台 API 一致，iOS
+仍然提供该方法，但 `setProxy` 在 iOS 上是空操作。开发环境抓包时，需要在
+iPhone 当前 Wi-Fi 的代理设置中，填写开发机 IP 和代理端口。
+
+如果代理工具需要解密 HTTPS 流量，需要把代理工具导出的根 CA 安装到测试
+设备，并在代理工具中开启 HTTPS/SSL 解密。iOS 手动安装证书后，还需要在
+**设置 → 通用 → 关于本机 → 证书信任设置**中开启信任。Android debug App
+需要通过 App 自己的 Network Security Configuration 明确信任用户证书；本
+插件不会自动安装或信任代理 CA。代理 CA 信任配置只应在开发环境使用。
 
 ## 使用方式
 

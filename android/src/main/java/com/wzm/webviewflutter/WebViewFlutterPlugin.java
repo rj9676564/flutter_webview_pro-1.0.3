@@ -8,10 +8,14 @@ import android.app.Activity;
 import android.content.Intent;
 
 import android.util.Log;
+import androidx.webkit.ProxyConfig;
+import androidx.webkit.ProxyController;
+import androidx.webkit.WebViewFeature;
 import io.flutter.embedding.engine.plugins.FlutterPlugin;
 import io.flutter.embedding.engine.plugins.activity.ActivityAware;
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding;
 import io.flutter.plugin.common.BinaryMessenger;
+import io.flutter.plugin.common.MethodChannel;
 import io.flutter.plugin.common.PluginRegistry;
 
 /**
@@ -22,6 +26,7 @@ import io.flutter.plugin.common.PluginRegistry;
 public class WebViewFlutterPlugin implements FlutterPlugin , PluginRegistry.ActivityResultListener,PluginRegistry.RequestPermissionsResultListener, ActivityAware{
   private static final String TAG = "WebViewFlutterPlugin";
   private FlutterCookieManager flutterCookieManager;
+  private MethodChannel webViewProxyChannel;
   public static Activity activity;
   private WebViewFactory factory;
 
@@ -43,6 +48,50 @@ public class WebViewFlutterPlugin implements FlutterPlugin , PluginRegistry.Acti
         .registerViewFactory(
             "plugins.flutter.io/webview", factory);
     flutterCookieManager = new FlutterCookieManager(messenger, binding.getApplicationContext());
+    webViewProxyChannel = new MethodChannel(messenger, "plugins.flutter.io/webview_proxy");
+    webViewProxyChannel.setMethodCallHandler((call, result) -> {
+      if (!"setProxy".equals(call.method)) {
+        result.notImplemented();
+        return;
+      }
+
+      if (!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE)) {
+        Log.w(TAG, "WebViewFeature.PROXY_OVERRIDE is not supported on this device.");
+        result.success(null);
+        return;
+      }
+
+      try {
+        String proxy = call.argument("proxy");
+        if (proxy == null || proxy.trim().isEmpty()) {
+          Log.i(TAG, "Clearing WebView proxy override.");
+          ProxyController.getInstance().clearProxyOverride(
+              Runnable::run,
+              () -> {
+                Log.i(TAG, "WebView proxy override cleared.");
+                result.success(null);
+              });
+        } else {
+          proxy = proxy.trim();
+          String proxyUrl = proxy.contains("://") ? proxy : "http://" + proxy;
+          Log.i(TAG, "Setting WebView proxy override to " + proxyUrl);
+          ProxyConfig proxyConfig = new ProxyConfig.Builder()
+              .addProxyRule(proxyUrl)
+              .addDirect()
+              .build();
+          ProxyController.getInstance().setProxyOverride(
+              proxyConfig,
+              Runnable::run,
+              () -> {
+                Log.i(TAG, "WebView proxy override applied.");
+                result.success(null);
+              });
+        }
+      } catch (Exception e) {
+        Log.e(TAG, "Failed to set webview proxy", e);
+        result.error("PROXY_ERROR", e.getMessage(), null);
+      }
+    });
   }
 
   @Override
@@ -53,6 +102,10 @@ public class WebViewFlutterPlugin implements FlutterPlugin , PluginRegistry.Acti
     activity = null;
     flutterCookieManager.dispose();
     flutterCookieManager = null;
+    if (webViewProxyChannel != null) {
+      webViewProxyChannel.setMethodCallHandler(null);
+      webViewProxyChannel = null;
+    }
   }
 
   @Override

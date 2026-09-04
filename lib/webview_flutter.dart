@@ -19,6 +19,29 @@ import 'src/webview_method_channel.dart';
 
 export 'src/session_webview_manager.dart';
 
+/// Configures the proxy used by platform WebViews.
+class WebViewProxy {
+  WebViewProxy._();
+
+  static const MethodChannel _channel =
+      MethodChannel('plugins.flutter.io/webview_proxy');
+
+  /// Sets a HTTP/SOCKS proxy such as `192.168.1.152:9090` or
+  /// `socks5://127.0.0.1:1080`.
+  ///
+  /// Pass `null` or an empty string to restore direct connections. On iOS,
+  /// WKWebView follows the system proxy and does not support an app-level
+  /// proxy override, so this method is a no-op.
+  static Future<void> setProxy(String? proxy) {
+    return _channel.invokeMethod<void>('setProxy', <String, dynamic>{
+      'proxy': proxy,
+    });
+  }
+
+  /// Clears the proxy override and restores the default system proxy settings.
+  static Future<void> clearProxy() => setProxy(null);
+}
+
 /// Optional callback invoked when a web view is first created. [controller] is
 /// the [WebViewController] for the created web view.
 typedef void WebViewCreatedCallback(WebViewController controller);

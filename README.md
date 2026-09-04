@@ -11,6 +11,48 @@ This package is based on Flutter WebView behavior and includes additional native
 - Clear all WebView cookies.
 - Clear WebView cookies for specified domains with `CookieManager.clearCookiesForDomains`.
 - Keep session-specific WebView instances resident with `SessionWebViewManager`.
+- Configure an Android WebView HTTP/SOCKS proxy with `WebViewProxy`.
+
+## WebView proxy
+
+Configure the proxy before creating or loading a WebView:
+
+```dart
+import 'package:flutter_webview_pro/webview_flutter.dart';
+
+await WebViewProxy.setProxy('192.168.1.152:9090');
+// HTTP proxy with an explicit scheme:
+// await WebViewProxy.setProxy('http://192.168.1.152:9090');
+// SOCKS proxy:
+// await WebViewProxy.setProxy('socks5://127.0.0.1:1080');
+```
+
+Supported proxy formats are `host:port`, `http://host:port`, and
+`socks5://host:port`. Passing `null` or an empty string clears the override and
+restores the default connection:
+
+```dart
+await WebViewProxy.clearProxy();
+```
+
+On Android, this feature uses AndroidX WebKit `ProxyController` and applies to
+WebViews in the current application process. The proxy configuration is
+applied asynchronously, so await `setProxy` before creating or loading the
+WebView. The device's Android System WebView/Chrome must support the proxy
+override feature; old WebView implementations may ignore the request.
+
+On iOS, `WKWebView` does not provide an app-level proxy override. The same API
+is kept for cross-platform compatibility, but `setProxy` is a no-op on iOS. For
+development traffic capture, configure the proxy in the iPhone's current Wi-Fi
+network settings, using the development computer's IP address and proxy port.
+
+If the proxy tool decrypts HTTPS traffic, install its root CA on the test
+device and enable HTTPS/SSL interception in the proxy tool. On iOS, manually
+installed certificates also need to be enabled in **Settings > General > About
+> Certificate Trust Settings**. On Android, a debug app should explicitly
+trust user-installed CAs through its app-level Network Security Configuration;
+this package does not install or trust a proxy CA automatically. Use proxy CA
+trust settings only in development builds.
 
 ## Usage
 
