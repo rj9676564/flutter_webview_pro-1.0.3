@@ -128,7 +128,9 @@ class SurfaceAndroidWebView extends AndroidWebView {
         );
       },
       onCreatePlatformView: (PlatformViewCreationParams params) {
-        return PlatformViewsService.initSurfaceAndroidView(
+        // initSurfaceAndroidView 在新版 Flutter 走纹理层(ImageReader)，
+        // 华为 EMUI 10 上拍照返回后出现 dequeueBuffer -110，画面冻结；改用真正的混合合成
+        return PlatformViewsService.initExpensiveAndroidView(
           id: params.id,
           viewType: 'plugins.flutter.io/webview',
           // WebView content is not affected by the Android view's layout direction,

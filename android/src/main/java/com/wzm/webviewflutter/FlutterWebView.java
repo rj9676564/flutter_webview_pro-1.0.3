@@ -71,6 +71,7 @@ public class FlutterWebView implements PlatformView, MethodCallHandler {
     public static final int RESULT_OK = -1;
 
     private String[] perms = {Manifest.permission.CAMERA};
+    private boolean disposed = false;
     private static final int REQUEST_CAMERA = 1;
     private static final int REQUEST_LOCATION = 100;
     private Uri cameraUri;
@@ -330,6 +331,10 @@ public class FlutterWebView implements PlatformView, MethodCallHandler {
         @Override
         public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, FileChooserParams fileChooserParams) {
             Log.v(TAG, "openFileChooser Android >= 5.0");
+            // 上一次选择若未回调结果，WebView 内核不会再触发新的选择，导致点击无反应，这里先取消旧的
+            if (uploadMessageAboveL != null && uploadMessageAboveL != filePathCallback) {
+                uploadMessageAboveL.onReceiveValue(null);
+            }
             uploadMessageAboveL = filePathCallback;
             FlutterWebView.this.fileChooserParams = fileChooserParams;
             if (WBH5FaceVerifySDK.getInstance().isTencentH5FaceVerify(webView, fileChooserParams, null)) { //true说 明是腾讯的h5刷脸页面
@@ -724,6 +729,7 @@ public class FlutterWebView implements PlatformView, MethodCallHandler {
 
     @Override
     public void dispose() {
+        disposed = true;
         methodChannel.setMethodCallHandler(null);
         if (webView instanceof InputAwareWebView) {
             ((InputAwareWebView) webView).dispose();
@@ -824,7 +830,7 @@ public class FlutterWebView implements PlatformView, MethodCallHandler {
                 }
                 outputImage.createNewFile();
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                    cameraUri = FileProvider.getUriForFile(WebViewFlutterPlugin.activity, WebViewFlutterPlugin.activity.getPackageName() + ".fileprovider", outputImage);
+                    cameraUri = FileProvider.getUriForFile(WebViewFlutterPlugin.activity, WebViewFlutterPlugin.activity.getPackageName() + ".fileProvider", outputImage);
                 } else {
                     Uri.fromFile(outputImage);
                 }
@@ -865,7 +871,15 @@ public class FlutterWebView implements PlatformView, MethodCallHandler {
         }
     }
 
+    public boolean isDisposed() {
+        return disposed;
+    }
+
     public boolean requestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        // 结果会分发给所有 WebView，只有正在等待选择结果的那个才处理，避免重复拉起相机
+        if (null == uploadMessage && null == uploadMessageAboveL) {
+            return false;
+        }
         if (requestCode == REQUEST_CAMERA) {
             if (grantResults[0] == PackageManager.PERMISSION_GRANTED) {
                 openCamera();

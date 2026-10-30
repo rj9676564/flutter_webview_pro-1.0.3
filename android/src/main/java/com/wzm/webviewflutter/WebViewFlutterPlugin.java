@@ -111,11 +111,14 @@ public class WebViewFlutterPlugin implements FlutterPlugin , PluginRegistry.Acti
   @Override
   public boolean onActivityResult(int requestCode, int resultCode, Intent data) {
     Log.v(TAG,"onActivityResult");
-    if (factory != null && factory.getFlutterWebView() != null){
-      return factory.getFlutterWebView().activityResult(requestCode, resultCode, data);
+    boolean handled = false;
+    if (factory != null) {
+      // 持有选择回调的不一定是最后创建的 WebView，分发给所有存活实例，各自按是否有回调决定是否处理
+      for (FlutterWebView webView : factory.getActiveWebViews()) {
+        handled |= webView.activityResult(requestCode, resultCode, data);
+      }
     }
-
-    return false;
+    return handled;
   }
 
   @Override
@@ -144,10 +147,12 @@ public class WebViewFlutterPlugin implements FlutterPlugin , PluginRegistry.Acti
   @Override
   public boolean onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
     Log.v(TAG,"onRequestPermissionsResult");
-    if (factory != null && factory.getFlutterWebView() != null){
-      return factory.getFlutterWebView().requestPermissionsResult(requestCode, permissions, grantResults);
+    boolean handled = false;
+    if (factory != null) {
+      for (FlutterWebView webView : factory.getActiveWebViews()) {
+        handled |= webView.requestPermissionsResult(requestCode, permissions, grantResults);
+      }
     }
-
-    return false;
+    return handled;
   }
 }
